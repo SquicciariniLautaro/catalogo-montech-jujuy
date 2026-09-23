@@ -3,7 +3,7 @@ import { supabase } from './supabase'
 import toast from 'react-hot-toast'
 
 function Admin() {
-const [cotizacion, setCotizacion] = useState(1250)
+ const [cotizacion, setCotizacion] = useState(1250)
 const [stock, setStock] = useState([])
 const [vendidos, setVendidos] = useState([])
 const [cargando, setCargando] = useState(true)
@@ -15,6 +15,9 @@ const [form, setForm] = useState(estadoInicialForm)
 
 const [editandoId, setEditandoId] = useState(null)
 const [formEdicion, setFormEdicion] = useState({})
+
+//Estado para el filtro de meses
+const [mesSeleccionado, setMesSeleccionado] = useState('todos')
 
 useEffect(() => {
     document.title = "Montech | Admin"
@@ -42,7 +45,6 @@ async function cargarDatos() {
     setStock(Object.values(agrupados))
     }
 
-    // Traemos el historial de ventas, ordenado por los más recientes primero
     const { data: vendidosData } = await supabase.from('celulares').select('*').eq('estado', 'vendido').order('fecha_venta', { ascending: false })
     if (vendidosData) setVendidos(vendidosData)
 
@@ -178,9 +180,28 @@ const renderizarCirculoColor = (valorColor) => {
     return <span className={`inline-block w-3.5 h-3.5 rounded-full ml-1.5 align-middle shadow-sm ${claseColor} ${conBorde ? 'border border-gray-300' : ''}`} />;
 };
 
-const totalVendidos = vendidos.length
-const gananciaTotalUSD = vendidos.reduce((acc, celu) => acc + (celu.precio_usd - celu.costo_usd), 0)
-const gananciaTotalARS = gananciaTotalUSD * cotizacion
+  // --- LÓGICA DE FILTRADO POR MESES ---
+const obtenerMesAnio = (fechaISO) => {
+    if (!fechaISO) return 'Sin fecha';
+    const fecha = new Date(fechaISO);
+    const mes = (fecha.getMonth() + 1).toString().padStart(2, '0');
+    return `${fecha.getFullYear()}-${mes}`;
+};
+
+const formatearNombreMes = (yyyyMm) => {
+    if (yyyyMm === 'Sin fecha') return 'Sin fecha';
+    const [year, month] = yyyyMm.split('-');
+    const meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+    return `${meses[parseInt(month) - 1]} ${year}`;
+};
+
+const mesesDisponibles = [...new Set(vendidos.map(v => obtenerMesAnio(v.fecha_venta)))].filter(m => m !== 'Sin fecha').sort().reverse();
+const ventasFiltradas = mesSeleccionado === 'todos' ? vendidos : vendidos.filter(v => obtenerMesAnio(v.fecha_venta) === mesSeleccionado);
+
+const totalVendidos = ventasFiltradas.length;
+const gananciaTotalUSD = ventasFiltradas.reduce((acc, celu) => acc + (celu.precio_usd - celu.costo_usd), 0);
+const gananciaTotalARS = gananciaTotalUSD * cotizacion;
+// -------------------------------------
 
 if (cargando) return <div className="min-h-screen flex items-center justify-center font-bold text-gray-500">Cargando datos...</div>
 
@@ -275,8 +296,26 @@ return (
         </div>
         </div>
 
-        {/* COLUMNA DERECHA (Tablas) */}
+        {/* COLUMNA DERECHA (Tablas y Métricas) */}
         <div className="lg:col-span-8 space-y-6">
+        
+          {/* BARRA DE FILTRO POR MES */}
+        <div className="flex justify-between items-end">
+            <h2 className="text-xl font-bold text-gray-800">Resumen de Ventas</h2>
+            {mesesDisponibles.length > 0 && (
+            <select 
+                value={mesSeleccionado} 
+                onChange={(e) => setMesSeleccionado(e.target.value)}
+                className="border border-gray-300 rounded-lg px-4 py-2 text-sm font-bold bg-white text-gray-700 outline-none shadow-sm cursor-pointer hover:bg-gray-50 transition"
+            >
+                <option value="todos">Histórico Total</option>
+                {mesesDisponibles.map(mes => (
+                <option key={mes} value={mes}>{formatearNombreMes(mes)}</option>
+                ))}
+            </select>
+            )}
+        </div>
+
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
             <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-blue-500">
             <p className="text-gray-500 text-sm font-medium">Equipos Vendidos</p>
@@ -327,7 +366,7 @@ return (
                                 <option value="Gris">Gris</option>
                                 <option value="Oro">Oro</option>
                                 <option value="Rosa">Rosa</option>
-                                <option value="Azul">Azul</option>
+                                <option value="Azul">Azul /</option>
                                 <option value="Morado">Morado / Púrpura</option>
                                 <option value="Verde">Verde</option>
                                 <option value="Amarillo">Amarillo</option>
@@ -386,10 +425,9 @@ return (
           {/* TABLA: HISTORIAL DE VENTAS */}
         <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden mt-6">
             <div className="bg-gray-50 p-4 border-b border-gray-200 flex justify-between items-center">
-            <h2 className="text-lg font-bold text-gray-800">Historial de Ventas</h2>
-            <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-bold shadow-sm">
-                {vendidos.length} equipos vendidos
-            </span>
+            <h2 className="text-lg font-bold text-gray-800">
+                {mesSeleccionado === 'todos' ? 'Historial Completo' : `Ventas de ${formatearNombreMes(mesSeleccionado)}`}
+            </h2>
             </div>
             
             <div className="max-h-[300px] overflow-y-auto">
@@ -402,7 +440,7 @@ return (
                 </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                {vendidos.map((celu) => (
+                {ventasFiltradas.map((celu) => (
                     <tr key={celu.id} className="hover:bg-gray-50 transition">
                     <td className="p-4 font-semibold text-gray-800">
                         {celu.modelo} {celu.capacidad} {renderizarCirculoColor(celu.color)}
@@ -419,14 +457,14 @@ return (
                 ))}
                 </tbody>
             </table>
-            {vendidos.length === 0 && <p className="text-center p-8 text-gray-500">Aún no hay ventas registradas.</p>}
+            {ventasFiltradas.length === 0 && <p className="text-center p-8 text-gray-500">No hay ventas en este período.</p>}
             </div>
         </div>
 
         </div>
     </div>
 
-{/* FIRMA DE TU AGENCIA (Con enlace a Instagram) */}
+      {/* FIRMA DE AGENCIA (Con enlace a Instagram) */}
     <div className="mt-auto pt-10 text-center flex flex-col items-center">
         <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5">
         Desarrollado por
