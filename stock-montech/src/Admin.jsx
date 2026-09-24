@@ -3,28 +3,28 @@ import { supabase } from './supabase'
 import toast from 'react-hot-toast'
 
 function Admin() {
-  const [cotizacion, setCotizacion] = useState(1250)
-  const [stock, setStock] = useState([])
-  const [vendidos, setVendidos] = useState([])
-  const [cargando, setCargando] = useState(true)
+const [cotizacion, setCotizacion] = useState(1250)
+const [stock, setStock] = useState([])
+const [vendidos, setVendidos] = useState([])
+const [cargando, setCargando] = useState(true)
 
-  const estadoInicialForm = {
+const estadoInicialForm = {
     modelo: '', capacidad: '', color: '', bateria: '', costo_usd: '', precio_usd: '', detalles: '', cantidad: 1
-  }
-  const [form, setForm] = useState(estadoInicialForm)
+}
+const [form, setForm] = useState(estadoInicialForm)
 
-  const [editandoId, setEditandoId] = useState(null)
-  const [formEdicion, setFormEdicion] = useState({})
-  
-  const [mesSeleccionado, setMesSeleccionado] = useState('todos')
+const [editandoId, setEditandoId] = useState(null)
+const [formEdicion, setFormEdicion] = useState({})
 
-  useEffect(() => {
+const [mesSeleccionado, setMesSeleccionado] = useState('todos')
+
+useEffect(() => {
     document.title = "Montech | Admin"
     cargarDatos(true) // Solo muestra la pantalla de carga la primera vez
-  }, [])
+}, [])
 
   // Ahora recibe 'mostrarLoader' para actualizar la tabla por detrás sin que salte la pantalla
-  async function cargarDatos(mostrarLoader = false) {
+async function cargarDatos(mostrarLoader = false) {
     if (mostrarLoader) setCargando(true)
     
     const { data: config } = await supabase.from('configuracion').select('cotizacion_dolar').eq('id', 1).single()
@@ -33,138 +33,138 @@ function Admin() {
     const { data: disponibles } = await supabase.from('celulares').select('*').eq('estado', 'disponible').order('fecha_ingreso', { ascending: false })
     
     if (disponibles) {
-      const agrupados = disponibles.reduce((acc, celu) => {
+    const agrupados = disponibles.reduce((acc, celu) => {
         const key = `${celu.modelo}-${celu.capacidad}-${celu.color}-${celu.bateria}-${celu.costo_usd}-${celu.precio_usd}-${celu.detalles}`
         if (!acc[key]) {
-          acc[key] = { ...celu, cantidad: 1, ids: [celu.id] }
+        acc[key] = { ...celu, cantidad: 1, ids: [celu.id] }
         } else {
-          acc[key].cantidad += 1
-          acc[key].ids.push(celu.id)
+        acc[key].cantidad += 1
+        acc[key].ids.push(celu.id)
         }
         return acc
-      }, {})
-      setStock(Object.values(agrupados))
+    }, {})
+    setStock(Object.values(agrupados))
     }
 
     const { data: vendidosData } = await supabase.from('celulares').select('*').eq('estado', 'vendido').order('fecha_venta', { ascending: false })
     if (vendidosData) setVendidos(vendidosData)
 
     if (mostrarLoader) setCargando(false)
-  }
+}
 
-  const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value })
+const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value })
 
-  async function handleActualizarDolar() {
+async function handleActualizarDolar() {
     const { error } = await supabase.from('configuracion').update({ cotizacion_dolar: cotizacion }).eq('id', 1)
     if (!error) toast.success("Cotización actualizada")
-  }
+}
 
-  async function handleGuardarCelular(e) {
+async function handleGuardarCelular(e) {
     e.preventDefault()
     const cantidad = parseInt(form.cantidad) || 1;
     
     let capacidadFormat = form.capacidad.trim().toUpperCase();
     if (capacidadFormat && !capacidadFormat.includes('GB') && !capacidadFormat.includes('TB')) {
-      capacidadFormat += 'GB';
+    capacidadFormat += 'GB';
     }
     
     const nuevosCelulares = Array.from({ length: cantidad }, () => ({
-      modelo: form.modelo,
-      capacidad: capacidadFormat,
-      color: form.color,
-      bateria: parseInt(form.bateria),
-      costo_usd: parseFloat(form.costo_usd),
-      precio_usd: parseFloat(form.precio_usd),
-      detalles: form.detalles
+    modelo: form.modelo,
+    capacidad: capacidadFormat,
+    color: form.color,
+    bateria: parseInt(form.bateria),
+    costo_usd: parseFloat(form.costo_usd),
+    precio_usd: parseFloat(form.precio_usd),
+    detalles: form.detalles
     }));
 
     const { error } = await supabase.from('celulares').insert(nuevosCelulares)
     
     if (!error) {
-      toast.success(`${cantidad} equipo(s) agregado(s)`)
-      setForm({ ...form, cantidad: 1, color: '' }) 
+    toast.success(`${cantidad} equipo(s) agregado(s)`)
+    setForm({ ...form, cantidad: 1, color: '' }) 
       cargarDatos(false) // Actualización silenciosa
     } else {
-      toast.error("Error al guardar: " + error.message)
+    toast.error("Error al guardar: " + error.message)
     }
-  }
+}
 
   // --- BOTONES INTELIGENTES MASIVOS ---
   const confirmarVenta = (celu) => {
     toast((t) => (
-      <div>
+    <div>
         <p className="font-bold text-white text-sm mb-3">¿Cuántas unidades vas a vender?</p>
         <div className="flex justify-end gap-2">
-          <button onClick={() => { toast.dismiss(t.id); ejecutarVenta([celu.ids[0]]); }} className="bg-green-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-green-600">Vender 1</button>
-          {celu.cantidad > 1 && <button onClick={() => { toast.dismiss(t.id); ejecutarVenta(celu.ids); }} className="bg-green-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-green-800">Vender TODOS ({celu.cantidad})</button>}
-          <button onClick={() => toast.dismiss(t.id)} className="bg-gray-200 text-gray-800 px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-gray-300">Cancelar</button>
+        <button onClick={() => { toast.dismiss(t.id); ejecutarVenta([celu.ids[0]]); }} className="bg-green-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-green-600">Vender 1</button>
+        {celu.cantidad > 1 && <button onClick={() => { toast.dismiss(t.id); ejecutarVenta(celu.ids); }} className="bg-green-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-green-800">Vender TODOS ({celu.cantidad})</button>}
+        <button onClick={() => toast.dismiss(t.id)} className="bg-gray-200 text-gray-800 px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-gray-300">Cancelar</button>
         </div>
-      </div>
+    </div>
     ), { duration: Infinity, id: 'confirm-venta' });
-  }
+}
 
-  async function ejecutarVenta(idsArray) {
+async function ejecutarVenta(idsArray) {
     await supabase.from('celulares').update({ estado: 'vendido', fecha_venta: new Date().toISOString() }).in('id', idsArray)
     toast.success(`¡${idsArray.length} venta(s) registrada(s)!`)
     cargarDatos(false)
-  }
+}
 
-  const confirmarBorrado = (celu) => {
+const confirmarBorrado = (celu) => {
     toast((t) => (
-      <div>
+    <div>
         <p className="font-bold text-white text-sm mb-3">¿Cuántas unidades querés borrar?</p>
         <div className="flex justify-end gap-2">
-          <button onClick={() => { toast.dismiss(t.id); ejecutarBorrado([celu.ids[0]]); }} className="bg-red-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-red-600">Borrar 1</button>
-          {celu.cantidad > 1 && <button onClick={() => { toast.dismiss(t.id); ejecutarBorrado(celu.ids); }} className="bg-red-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-red-800">Borrar TODOS ({celu.cantidad})</button>}
-          <button onClick={() => toast.dismiss(t.id)} className="bg-gray-200 text-gray-800 px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-gray-300">Cancelar</button>
+        <button onClick={() => { toast.dismiss(t.id); ejecutarBorrado([celu.ids[0]]); }} className="bg-red-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-red-600">Borrar 1</button>
+        {celu.cantidad > 1 && <button onClick={() => { toast.dismiss(t.id); ejecutarBorrado(celu.ids); }} className="bg-red-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-red-800">Borrar TODOS ({celu.cantidad})</button>}
+        <button onClick={() => toast.dismiss(t.id)} className="bg-gray-200 text-gray-800 px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-gray-300">Cancelar</button>
         </div>
-      </div>
+    </div>
     ), { duration: Infinity, id: 'confirm-borrar' });
-  }
+}
 
-  async function ejecutarBorrado(idsArray) {
+async function ejecutarBorrado(idsArray) {
     await supabase.from('celulares').delete().in('id', idsArray)
     toast.success(`${idsArray.length} equipo(s) eliminado(s)`)
     cargarDatos(false)
-  }
+}
 
-  const iniciarEdicion = (celular) => {
+const iniciarEdicion = (celular) => {
     setEditandoId(celular.ids[0])
     // Agregamos cantidadAEditar por defecto a la cantidad total del grupo
     setFormEdicion({ ...celular, cantidadAEditar: celular.cantidad })
-  }
+}
 
-  const handleChangeEdicion = (e) => setFormEdicion({ ...formEdicion, [e.target.name]: e.target.value })
+const handleChangeEdicion = (e) => setFormEdicion({ ...formEdicion, [e.target.name]: e.target.value })
 
-  async function guardarEdicion() {
+async function guardarEdicion() {
     let capacidadFormat = formEdicion.capacidad.trim().toUpperCase();
     if (capacidadFormat && !capacidadFormat.includes('GB') && !capacidadFormat.includes('TB')) {
-      capacidadFormat += 'GB';
+    capacidadFormat += 'GB';
     }
 
     // Cortamos el array de IDs para editar solo la cantidad seleccionada
     const idsToUpdate = formEdicion.ids.slice(0, parseInt(formEdicion.cantidadAEditar));
 
     const { error } = await supabase.from('celulares').update({
-      modelo: formEdicion.modelo,
-      capacidad: capacidadFormat,
-      color: formEdicion.color,
-      bateria: parseInt(formEdicion.bateria),
-      costo_usd: parseFloat(formEdicion.costo_usd),
-      precio_usd: parseFloat(formEdicion.precio_usd),
-      detalles: formEdicion.detalles
+    modelo: formEdicion.modelo,
+    capacidad: capacidadFormat,
+    color: formEdicion.color,
+    bateria: parseInt(formEdicion.bateria),
+    costo_usd: parseFloat(formEdicion.costo_usd),
+    precio_usd: parseFloat(formEdicion.precio_usd),
+    detalles: formEdicion.detalles
     }).in('id', idsToUpdate)
 
     if (!error) {
-      toast.success(`${idsToUpdate.length} equipo(s) actualizado(s)`)
-      setEditandoId(null)
-      cargarDatos(false)
+    toast.success(`${idsToUpdate.length} equipo(s) actualizado(s)`)
+    setEditandoId(null)
+    cargarDatos(false)
     } else {
-      toast.error("Error al actualizar: " + error.message)
+    toast.error("Error al actualizar: " + error.message)
     }
-  }
+}
 
-  const renderizarCirculoColor = (valorColor) => {
+const renderizarCirculoColor = (valorColor) => {
     if (!valorColor) return null;
     const c = valorColor.toLowerCase();
     let claseColor = ""; let conBorde = false;
@@ -183,62 +183,62 @@ function Admin() {
     else if (c.includes('titanio')) claseColor = "bg-stone-400"; 
     else return <span className="ml-1 text-xs text-gray-600 font-medium">{valorColor}</span>;
     return <span className={`inline-block w-3.5 h-3.5 rounded-full ml-1.5 align-middle shadow-sm ${claseColor} ${conBorde ? 'border border-gray-300' : ''}`} />;
-  };
+};
 
-  // --- CÁLCULOS DEL INVENTARIO ACTIVO ---
-  const totalStockEquipos = stock.reduce((acc, celu) => acc + celu.cantidad, 0);
-  const totalStockCosto = stock.reduce((acc, celu) => acc + (celu.costo_usd * celu.cantidad), 0);
-  const totalStockVenta = stock.reduce((acc, celu) => acc + (celu.precio_usd * celu.cantidad), 0);
-  const totalStockGananciaUSD = totalStockVenta - totalStockCosto;
-  const totalStockGananciaARS = totalStockGananciaUSD * cotizacion;
+// --- CÁLCULOS DEL INVENTARIO ACTIVO ---
+const totalStockEquipos = stock.reduce((acc, celu) => acc + celu.cantidad, 0);
+const totalStockCosto = stock.reduce((acc, celu) => acc + (celu.costo_usd * celu.cantidad), 0);
+const totalStockVenta = stock.reduce((acc, celu) => acc + (celu.precio_usd * celu.cantidad), 0);
+const totalStockGananciaUSD = totalStockVenta - totalStockCosto;
+const totalStockGananciaARS = totalStockGananciaUSD * cotizacion;
 
-  const obtenerMesAnio = (fechaISO) => {
+const obtenerMesAnio = (fechaISO) => {
     if (!fechaISO) return 'Sin fecha';
     const fecha = new Date(fechaISO);
     const mes = (fecha.getMonth() + 1).toString().padStart(2, '0');
     return `${fecha.getFullYear()}-${mes}`;
-  };
+};
 
-  const formatearNombreMes = (yyyyMm) => {
+const formatearNombreMes = (yyyyMm) => {
     if (yyyyMm === 'Sin fecha') return 'Sin fecha';
     const [year, month] = yyyyMm.split('-');
     const meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
     return `${meses[parseInt(month) - 1]} ${year}`;
-  };
+};
 
-  const mesesDisponibles = [...new Set(vendidos.map(v => obtenerMesAnio(v.fecha_venta)))].filter(m => m !== 'Sin fecha').sort().reverse();
-  const ventasFiltradas = mesSeleccionado === 'todos' ? vendidos : vendidos.filter(v => obtenerMesAnio(v.fecha_venta) === mesSeleccionado);
-  const totalVendidos = ventasFiltradas.length;
-  const gananciaVentasUSD = ventasFiltradas.reduce((acc, celu) => acc + (celu.precio_usd - celu.costo_usd), 0);
-  const gananciaVentasARS = gananciaVentasUSD * cotizacion;
+const mesesDisponibles = [...new Set(vendidos.map(v => obtenerMesAnio(v.fecha_venta)))].filter(m => m !== 'Sin fecha').sort().reverse();
+const ventasFiltradas = mesSeleccionado === 'todos' ? vendidos : vendidos.filter(v => obtenerMesAnio(v.fecha_venta) === mesSeleccionado);
+const totalVendidos = ventasFiltradas.length;
+const gananciaVentasUSD = ventasFiltradas.reduce((acc, celu) => acc + (celu.precio_usd - celu.costo_usd), 0);
+const gananciaVentasARS = gananciaVentasUSD * cotizacion;
 
-  if (cargando) return <div className="min-h-screen flex items-center justify-center font-bold text-gray-500">Cargando datos del sistema...</div>
+if (cargando) return <div className="min-h-screen flex items-center justify-center font-bold text-gray-500">Cargando datos del sistema...</div>
 
-  return (
+return (
     <div className="min-h-screen p-4 md:p-8 max-w-7xl mx-auto text-gray-800 flex flex-col">
-      <div className="flex flex-col md:flex-row justify-between items-center mb-8">
+    <div className="flex flex-col md:flex-row justify-between items-center mb-8">
         <div>
-          <h1 className="text-3xl font-extrabold text-gray-900 tracking-tight">Panel de Control</h1>
-          <div className="flex items-center gap-4 mt-1">
+        <h1 className="text-3xl font-extrabold text-gray-900 tracking-tight">Panel de Control</h1>
+        <div className="flex items-center gap-4 mt-1">
             <button onClick={() => supabase.auth.signOut()} className="text-sm font-bold text-red-500 hover:underline">
-              Cerrar Sesión
+            Cerrar Sesión
             </button>
             <span className="text-gray-300">|</span>
             <a href="/" target="_blank" rel="noreferrer" className="text-sm font-bold text-blue-600 hover:underline">
-              Ver Catálogo Público ↗
+            Ver Catálogo Público ↗
             </a>
-          </div>
+        </div>
         </div>
         
         <div className="mt-4 md:mt-0 flex items-center bg-white p-2 rounded-xl shadow-sm border border-gray-200">
-          <span className="font-semibold px-3 text-green-600">USD</span>
-          <input 
+        <span className="font-semibold px-3 text-green-600">USD</span>
+        <input 
             type="number" min="0" value={cotizacion} onChange={(e) => setCotizacion(e.target.value)}
             className="w-24 border-l pl-3 py-1 outline-none font-bold text-gray-700 bg-transparent"
-          />
-          <button onClick={handleActualizarDolar} className="ml-2 bg-gray-900 text-white px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-gray-800 transition">
+        />
+        <button onClick={handleActualizarDolar} className="ml-2 bg-gray-900 text-white px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-gray-800 transition">
             Actualizar
-          </button>
+        </button>
         </div>
     </div>
 
