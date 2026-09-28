@@ -1,81 +1,92 @@
-import { useEffect, useState } from 'react'
-import { supabase } from './supabase'
+import React, { useEffect, useState } from 'react';
+import { supabase } from './supabase';
 
 function Catalogo() {
-  const [celularesAgrupados, setCelularesAgrupados] = useState([])
-  const [cotizacion, setCotizacion] = useState(1250)
-  const [descuentoMayorista, setDescuentoMayorista] = useState(5) // Nuevo estado
-  const [cargando, setCargando] = useState(true)
-  const [esAdmin, setEsAdmin] = useState(false)
-  
-  // Nuevo: Estado para la búsqueda
-  const [busqueda, setBusqueda] = useState("")
+  const [celularesAgrupados, setCelularesAgrupados] = useState([]);
+  const [cotizacion, setCotizacion] = useState(1250);
+  const [cargando, setCargando] = useState(true);
+  const [esAdmin, setEsAdmin] = useState(false);
+  const [busqueda, setBusqueda] = useState("");
 
-  const numeroMontech = "5493885265866"
+  const numeroMontech = "5493885265866";
+  const mensajeWsp = "Hola Montech! Estuve viendo el catalogo y queria hacer una consulta.";
+  const linkWspGeneral = "https://wa.me/" + numeroMontech + "?text=" + encodeURIComponent(mensajeWsp);
 
   useEffect(() => {
-    document.title = "Montech | Catálogo"
+    document.title = "Montech | Catalogo";
+    
     async function cargarDatos() {
       try {
-        const { data: { session } } = await supabase.auth.getSession()
-        if (session) setEsAdmin(true)
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session) setEsAdmin(true);
 
-        // Traemos cotización y el porcentaje de descuento
-        const { data: configData } = await supabase.from('configuracion').select('cotizacion_dolar, descuento_mayorista').eq('id', 1).single()
+        const { data: configData } = await supabase
+          .from('configuracion')
+          .select('cotizacion_dolar')
+          .eq('id', 1)
+          .single();
+          
         if (configData) {
-          setCotizacion(configData.cotizacion_dolar)
-          if(configData.descuento_mayorista) setDescuentoMayorista(configData.descuento_mayorista)
+          setCotizacion(configData.cotizacion_dolar);
         }
 
         const { data: celularesData } = await supabase
           .from('celulares')
           .select('*')
           .eq('estado', 'disponible')
-          .order('modelo', { ascending: true })
+          .order('modelo', { ascending: true });
 
         if (celularesData) {
           const agrupados = celularesData.reduce((acc, celu) => {
-            const key = `${celu.modelo}-${celu.capacidad}-${celu.color}-${celu.bateria}-${celu.precio_usd}-${celu.detalles}`
+            const key = celu.modelo + "-" + celu.capacidad + "-" + celu.color + "-" + celu.bateria + "-" + celu.precio_usd + "-" + celu.detalles;
             if (!acc[key]) {
-              acc[key] = { ...celu, cantidad: 1 }
+              acc[key] = { ...celu, cantidad: 1 };
             } else {
-              acc[key].cantidad += 1
+              acc[key].cantidad += 1;
             }
-            return acc
-          }, {})
-          setCelularesAgrupados(Object.values(agrupados))
+            return acc;
+          }, {});
+          setCelularesAgrupados(Object.values(agrupados));
         }
       } catch (error) {
-        console.error("Error al cargar datos:", error.message)
+        console.error(error.message);
       } finally {
-        setCargando(false)
+        setCargando(false);
       }
     }
-    cargarDatos()
-  }, [])
+    
+    cargarDatos();
+  }, []);
 
   const renderizarCirculoColor = (valorColor) => {
     if (!valorColor) return null;
     const c = valorColor.toLowerCase();
-    let claseColor = ""; let conBorde = false;
-    if (c.includes('\u26AB') || c.includes('negro') || c.includes('medianoche')) claseColor = "bg-gray-900";
-    else if (c.includes('\u26AA') || c.includes('blanco') || c.includes('estelar')) { claseColor = "bg-white"; conBorde = true; }
-    else if (c.includes('plata') || c.includes('silver')) claseColor = "bg-gray-200";
+    let claseColor = ""; 
+    let conBorde = false;
+    
+    //  Convierte cualquier emoji de la BD en un circulo CSS
+    if (c.includes('negro') || c.includes('medianoche') || c.includes('\u26ab') || c.includes('\u2b1b')) claseColor = "bg-gray-900";
+    else if (c.includes('blanco') || c.includes('estelar') || c.includes('\u26aa') || c.includes('\u2b1c')) { claseColor = "bg-white"; conBorde = true; }
+    else if (c.includes('plata') || c.includes('silver') || c.includes('titanio')) claseColor = "bg-gray-300";
     else if (c.includes('gris') || c.includes('grafito')) claseColor = "bg-gray-600";
     else if (c.includes('oro rosa') || c.includes('rosa')) claseColor = "bg-pink-300";
     else if (c.includes('oro') || c.includes('desierto')) claseColor = "bg-yellow-200"; 
-    else if (c.includes('\uD83D\uDD35') || c.includes('azul')) claseColor = "bg-blue-500";
-    else if (c.includes('\uD83D\uDC9C') || c.includes('morado') || c.includes('violeta') || c.includes('purpura')) claseColor = "bg-purple-600";
-    else if (c.includes('verde')) claseColor = "bg-emerald-500";
-    else if (c.includes('amarillo')) claseColor = "bg-yellow-400";
-    else if (c.includes('naranja')) claseColor = "bg-orange-500"; 
-    else if (c.includes('rojo') || c.includes('red')) claseColor = "bg-red-600";
-    else if (c.includes('titanio')) claseColor = "bg-stone-400"; 
-    else return <span className="ml-1 text-xs text-gray-600 font-medium">{valorColor}</span>;
-    return <span className={`inline-block w-3.5 h-3.5 rounded-full ml-1.5 align-middle shadow-sm ${claseColor} ${conBorde ? 'border border-gray-300' : ''}`} />;
+    else if (c.includes('azul') || c.includes('\ud83d\udd35')) claseColor = "bg-blue-500";
+    else if (c.includes('morado') || c.includes('violeta') || c.includes('purpura') || c.includes('\ud83d\udc9c') || c.includes('\ud83d\udfe3')) claseColor = "bg-purple-600";
+    else if (c.includes('verde') || c.includes('\ud83d\udfe2')) claseColor = "bg-emerald-500";
+    else if (c.includes('amarillo') || c.includes('\ud83d\udfe1')) claseColor = "bg-yellow-400";
+    else if (c.includes('naranja') || c.includes('\ud83d\udfe0')) claseColor = "bg-orange-500"; 
+    else if (c.includes('rojo') || c.includes('red') || c.includes('\ud83d\udd34') || c.includes('\u2764')) claseColor = "bg-red-600";
+    else {
+      // Si el color no coincide, quitamos cualquier emoji que rompa la estetica y mostramos solo el texto
+      const textoLimpio = valorColor.replace(/[^\w\sñÑáéíóúÁÉÍÓÚ-]/gi, '').trim();
+      if (!textoLimpio) return null;
+      return <span className="ml-1 text-xs text-gray-600 font-medium uppercase"> {textoLimpio} </span>;
+    }
+    
+    return <span className={"inline-block w-3.5 h-3.5 rounded-full ml-1.5 align-middle shadow-sm " + claseColor + (conBorde ? " border border-gray-300" : "")} />;
   };
 
-  // Filtrado en tiempo real
   const celularesFiltrados = celularesAgrupados.filter(celu => {
     const termino = busqueda.toLowerCase();
     return celu.modelo.toLowerCase().includes(termino) || 
@@ -83,10 +94,24 @@ function Catalogo() {
            celu.capacidad.toLowerCase().includes(termino);
   });
 
-  if (cargando) return <div className="p-10 text-center font-bold text-gray-600">Cargando catálogo...</div>
+  if (cargando) {
+    return <div className="p-10 text-center font-bold text-gray-600"> Cargando catalogo... </div>;
+  }
 
   return (
     <div className="relative p-2 md:p-4 max-w-4xl mx-auto font-sans bg-white pb-6 min-h-screen flex flex-col">
+      
+      {/* Boton Flotante de WhatsApp */}
+      <a 
+        href={linkWspGeneral} 
+        target="_blank" 
+        rel="noreferrer" 
+        className="fixed bottom-6 right-6 md:bottom-8 md:right-8 z-50 bg-white p-3 rounded-full shadow-xl border border-gray-200 hover:scale-110 transition-transform flex items-center justify-center"
+        title="Consultar por WhatsApp"
+      >
+        <img src="/logo-whatsapp.png" alt="WhatsApp" className="w-8 h-8 md:w-10 md:h-10 object-contain" onError={(e) => { e.target.style.display = 'none'; }} />
+      </a>
+
       {esAdmin && (
         <a href="/admin" className="absolute top-3 right-3 bg-gray-900 text-white px-3 py-1.5 rounded-md text-xs font-bold shadow-md hover:bg-gray-800 transition">
           Volver al Panel
@@ -94,72 +119,91 @@ function Catalogo() {
       )}
 
       <div className="flex justify-center items-center mb-4 mt-6">
-        <img src="/logo.png" alt="Montech Jujuy" className="h-28 md:h-36 object-contain drop-shadow-xl" onError={(e) => e.target.style.display = 'none'} />
+        <img src="/logo.png" alt="Montech Jujuy" className="h-28 md:h-36 object-contain drop-shadow-xl" onError={(e) => { e.target.style.display = 'none'; }} />
       </div>
 
-      {/* BARRA DE BÚSQUEDA */}
       <div className="mb-6 relative">
         <input 
           type="text" 
-          placeholder="Buscar por modelo (Ej: 14 Pro), color o capacidad..." 
+          placeholder="Buscar por modelo" 
           value={busqueda}
           onChange={(e) => setBusqueda(e.target.value)}
-          className="w-full border border-gray-300 p-3 pl-10 rounded-xl bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-200 outline-none transition"
+          className="w-full border border-gray-300 p-3 rounded-xl bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-200 outline-none transition"
         />
-        <svg className="w-5 h-5 absolute left-3 top-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
       </div>
       
-      <div className="overflow-x-auto shadow-sm border border-gray-300 rounded-lg flex-grow w-full">
-        <table className="w-full border-collapse text-sm min-w-[850px]">
+      <div className="shadow-sm border border-gray-300 rounded-lg flex-grow w-full">
+        <table className="w-full border-collapse text-sm">
           <thead>
-            <tr className="bg-[#e4ecfa] border-b border-gray-300 text-gray-900 text-[11px] uppercase font-bold tracking-wider">
-              <th className="p-3 text-center w-1/12">Cant</th>
-              <th className="p-3 border-r border-gray-300 text-left">Modelo / Color</th>
-              <th className="p-3 border-r border-gray-300 text-center">Batería</th>
-              <th className="p-3 border-r border-gray-300 text-right">Precio Contado</th>
-              <th className="p-3 border-r border-gray-300 text-right text-blue-700">Mayorista (-{descuentoMayorista}%)</th>
-              <th className="p-3 text-left border-r border-gray-300">Detalles</th>
-              <th className="p-3 text-center w-1/12">Consultar</th>
+            <tr className="bg-[#e4ecfa] border-b border-gray-300 text-gray-900 text-[10px] md:text-[11px] uppercase font-bold tracking-wider">
+              <th className="p-2 md:p-3 text-center w-1/12"> Cant </th>
+              <th className="p-2 md:p-3 border-r border-gray-300 text-left w-5/12"> Modelo / Color </th>
+              <th className="p-2 md:p-3 border-r border-gray-300 text-center w-2/12"> Bateria </th>
+              <th className="p-2 md:p-3 border-r border-gray-300 text-right w-4/12"> Precio Contado </th>
+              <th className="p-2 md:p-3 text-left hidden md:table-cell w-auto"> Detalles </th>
             </tr>
           </thead>
           <tbody>
             {celularesFiltrados.length === 0 && (
-              <tr><td colSpan="7" className="text-center p-6 text-gray-500">No se encontraron equipos con esa búsqueda.</td></tr>
+              <tr>
+                <td colSpan="5" className="text-center p-6 text-gray-500">
+                  No se encontraron equipos con esa busqueda.
+                </td>
+              </tr>
             )}
 
             {celularesFiltrados.map((celu, index) => {
-              const precioPesos = celu.precio_usd * cotizacion
-              const multiplicadorDescuento = (100 - descuentoMayorista) / 100
-              const precioMayoristaPesos = precioPesos * multiplicadorDescuento
-              
-              const colorLimpio = celu.color.replace(/[^\w\sñÑáéíóúÁÉÍÓÚ]/gi, '').trim()
-              const textoWsp = `Hola Montech! 👋 Vi en tu catálogo el *${celu.modelo} ${celu.capacidad}* (${colorLimpio}) a *$${precioPesos.toLocaleString("es-AR")}*. ¿Tenés stock?`
-              const linkWsp = `https://wa.me/${numeroMontech}?text=${encodeURIComponent(textoWsp)}`
+              const precioPesos = celu.precio_usd * cotizacion;
 
               return (
-                <tr key={index} className={`border-b border-gray-200 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-gray-100 transition`}>
-                  <td className="p-3 text-center font-bold text-blue-600 bg-blue-50 border-r border-blue-100">{celu.cantidad}</td>
-                  <td className="p-3 border-r border-gray-200 font-bold whitespace-nowrap text-gray-800 text-[13px]">
-                    {celu.modelo} <span className="font-medium text-gray-500 text-xs ml-1">{celu.capacidad}</span> {renderizarCirculoColor(celu.color)}
+                <tr key={index} className={"border-b border-gray-200 " + (index % 2 === 0 ? "bg-white" : "bg-gray-50") + " hover:bg-gray-100 transition"}>
+                  <td className="p-2 md:p-3 text-center font-bold text-blue-600 bg-blue-50 border-r border-blue-100"> {celu.cantidad} </td>
+                  <td className="p-2 md:p-3 border-r border-gray-200 font-bold whitespace-nowrap text-gray-800 text-[11px] md:text-[13px]">
+                    {celu.modelo} <span className="font-medium text-gray-500 text-[10px] md:text-xs ml-1"> {celu.capacidad} </span> {renderizarCirculoColor(celu.color)}
                   </td>
-                  <td className="p-3 border-r border-gray-200 text-center font-semibold text-gray-700">{celu.bateria}%</td>
-                  <td className="p-3 border-r border-gray-200 text-right font-black text-gray-900 text-[14px] whitespace-nowrap">$ {precioPesos.toLocaleString("es-AR")}</td>
-                  <td className="p-3 border-r border-gray-200 text-right font-black text-blue-700 text-[14px] whitespace-nowrap">$ {precioMayoristaPesos.toLocaleString("es-AR")}</td>
-                  <td className="p-3 text-[11px] text-gray-600 font-medium uppercase leading-relaxed border-r border-gray-200">{celu.detalles}</td>
-                  <td className="p-2 text-center">
-                    <a href={linkWsp} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center bg-green-500 hover:bg-green-600 text-white p-2 rounded-full transition shadow-sm" title="Consultar por WhatsApp">
-                      <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51a12.8 12.8 0 0 0-.57-.01c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413Z"/></svg>
-                    </a>
+                  <td className="p-2 md:p-3 border-r border-gray-200 text-center font-semibold text-gray-700 text-[11px] md:text-sm"> {celu.bateria}% </td>
+                  <td className="p-2 md:p-3 border-r border-gray-200 text-right font-black text-gray-900 text-[12px] md:text-[14px] whitespace-nowrap">
+                    $ {precioPesos.toLocaleString("es-AR")}
                   </td>
+                  <td className="p-2 md:p-3 text-[11px] text-gray-600 font-medium uppercase leading-relaxed hidden md:table-cell"> {celu.detalles} </td>
                 </tr>
-              )
+              );
             })}
           </tbody>
         </table>
       </div>
       
-      <div className="mt-3 text-right text-[11px] text-gray-400 font-semibold px-2 mb-8">Cotización de referencia USD: ${cotizacion}</div>
+      <div className="mt-3 text-right text-[11px] text-gray-400 font-semibold px-2 mb-8">
+        Cotizacion de referencia USD: ${cotizacion.toLocaleString('es-AR')}
+      </div>
+
+      <div className="mt-auto pt-8 pb-4 flex flex-col items-center w-full relative">
+        <a href="https://instagram.com/montech.jujuy" target="_blank" rel="noreferrer" className="flex items-center gap-2 text-gray-700 hover:text-black transition mb-5 bg-gray-50 px-4 py-2 rounded-full border border-gray-200 shadow-sm">
+          <img src="/logo-instagram.png" alt="Instagram" className="w-4 h-4 object-contain" onError={(e) => { e.target.style.display = 'none'; }} />
+          <span className="font-bold text-xs tracking-wide"> @montech.jujuy </span>
+        </a>
+
+        <div className="w-[80%] border-t border-gray-200 mb-4"> </div>
+
+        <div className="flex flex-col items-center">
+          <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5">
+            Desarrollado por
+          </span>
+          <div className="flex items-center gap-3">
+            <a href="https://www.instagram.com/lambdasoluciones/" target="_blank" rel="noreferrer" className="font-bold text-[11px] uppercase tracking-wider text-blue-600 hover:text-blue-800 transition">
+              LAMBDA SOLUCIONES
+            </a>
+            
+            <a href="/admin" className="text-gray-400 hover:text-gray-800 transition p-1" title="Acceso Administrativo">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"> </path>
+              </svg>
+            </a>
+          </div>
+        </div>
+      </div>
     </div>
-  )
+  );
 }
-export default Catalogo
+
+export default Catalogo;
