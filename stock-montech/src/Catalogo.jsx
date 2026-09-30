@@ -28,6 +28,7 @@ function Catalogo() {
         const { data: { session } } = await supabase.auth.getSession();
         if (session) setEsAdmin(true);
 
+        // Las vistas publicas no incluyen el costo de compra
         const { data: configData } = await supabase
           .from('catalogo_config')
           .select('cotizacion_dolar')
@@ -60,8 +61,8 @@ function Catalogo() {
         }
 
         const { data: accesoriosData } = await supabase
-            .from('catalogo_accesorios')
-            .select('*');
+          .from('catalogo_accesorios')
+          .select('*');
 
         if (accesoriosData) {
           const grupos = {};
