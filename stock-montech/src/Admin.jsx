@@ -405,7 +405,7 @@ function Admin() {
 
   const estadoInicialCelular = { modelo: '', capacidad: '', color: '', bateria: '', costo_usd: '', precio_usd: '', detalles: '', cantidad: 1 };
   const estadoInicialAccesorio = { tipo: '', modelo: '', color: '', costo_usd: '', precio_usd: '', detalles: '', cantidad: 1 };
-  const estadoInicialPermuta = { modelo: '', capacidad: '', color: '', bateria: '', detalles: '', precio_ars: '', precio_venta_ars: '' };
+  const estadoInicialPermuta = { modelo: '', capacidad: '', color: '', bateria: '', detalles: '', precio_ars: '', precio_venta_ars: '', entregaId: '' };
 
   const [formCelular, setFormCelular] = useState(estadoInicialCelular);
   const [formAccesorio, setFormAccesorio] = useState(estadoInicialAccesorio);
@@ -422,6 +422,7 @@ function Admin() {
   const [menu, setMenu] = useState(null); // { key, item, tabla, top, right }
   const [venta, setVenta] = useState(null); // { item, tabla, cantidad, mayorista }
   const [busquedaStock, setBusquedaStock] = useState('');
+  const [dialogo, setDialogo] = useState(null); // { titulo, texto, botones: [{ etiqueta, clase, accion }] }
   const [guardando, setGuardando] = useState(false);
   const ocupado = useRef(false);
 
@@ -440,6 +441,9 @@ function Admin() {
       setGuardando(false);
     }
   };
+
+  // Lote del stock que se entrega al cliente en la permuta (opcional)
+  const lotePermuta = stockCelulares.find((c) => String(c.ids[0]) === formPermuta.entregaId) || null;
 
   const cambiarTab = (tab) => {
     setActiveTab(tab);
@@ -615,12 +619,25 @@ function Admin() {
     };
 
     const { error } = await guardarLoteConPromedio('celulares', filaBase, 1, claveCelular);
-    if (!error) {
-      toast.success('Permuta registrada correctamente');
-      setShowPermutaModal(false);
-      setFormPermuta(estadoInicialPermuta);
-      cargarDatos(false);
-    } else toast.error('Error al registrar permuta: ' + error.message);
+    if (error) {
+      toast.error('Error al registrar permuta: ' + error.message);
+      return;
+    }
+
+    if (lotePermuta) {
+      // El equipo entregado sale del stock como una venta al precio del lote
+      const { error: errorEntrega } = await supabase
+        .from('celulares')
+        .update({ estado: 'vendido', fecha_venta: new Date().toISOString(), precio_usd: lotePermuta.precio_usd })
+        .eq('id', lotePermuta.ids[0]);
+      if (errorEntrega) toast.error('El equipo recibido se cargo, pero no se pudo registrar la entrega: ' + errorEntrega.message);
+      else toast.success('Permuta registrada: el equipo recibido entro al stock y el entregado quedo como vendido');
+    } else {
+      toast.success('Permuta registrada: el equipo recibido entro al stock');
+    }
+    setShowPermutaModal(false);
+    setFormPermuta(estadoInicialPermuta);
+    cargarDatos(false);
   }
 
   // ---------- Menu de opciones ----------
@@ -669,31 +686,12 @@ function Admin() {
   }
 
   // Anular una venta cargada por error: la unidad vuelve al stock
-  const confirmarAnulacion = (item) => {
-    toast(
-      (t) => (
-        <div>
-          <p className="font-bold text-gray-800 text-sm mb-1">Anular esta venta?</p>
-          <p className="text-xs text-gray-600 mb-3">La unidad vuelve al stock disponible.</p>
-          <div className="flex justify-end gap-2">
-            <button
-              onClick={() => { toast.dismiss(t.id); conBloqueo(anularVenta)(item); }}
-              className="bg-red-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-600"
-            >
-              Anular
-            </button>
-            <button
-              onClick={() => toast.dismiss(t.id)}
-              className="bg-gray-200 text-gray-800 px-3 py-2 rounded-lg text-xs font-bold hover:bg-gray-300"
-            >
-              Cancelar
-            </button>
-          </div>
-        </div>
-      ),
-      { duration: Infinity, id: 'confirm-anular' }
-    );
-  };
+  const confirmarAnulacion = (item) =>
+    setDialogo({
+      titulo: 'Anular esta venta?',
+      texto: 'La unidad vuelve al stock disponible.',
+      botones: [{ etiqueta: 'Anular venta', clase: 'bg-red-600 hover:bg-red-700', accion: () => anularVenta(item) }],
+    });
 
   async function anularVenta(item) {
     const tabla = item.categoria === 'celular' ? 'celulares' : 'accesorios';
@@ -708,36 +706,20 @@ function Admin() {
 
   // ---------- Borrado ----------
   const confirmarBorrado = (item, tabla) => {
-    toast(
-      (t) => (
-        <div>
-          <p className="font-bold text-gray-800 text-sm mb-3">Cuantas unidades queres borrar?</p>
-          <div className="flex flex-wrap justify-end gap-2">
-            <button
-              onClick={() => { toast.dismiss(t.id); conBloqueo(ejecutarBorrado)([item.ids[0]], tabla); }}
-              className="bg-red-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-600"
-            >
-              Borrar 1
-            </button>
-            {item.cantidad > 1 && (
-              <button
-                onClick={() => { toast.dismiss(t.id); conBloqueo(ejecutarBorrado)(item.ids, tabla); }}
-                className="bg-red-700 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-800"
-              >
-                Borrar TODOS
-              </button>
-            )}
-            <button
-              onClick={() => toast.dismiss(t.id)}
-              className="bg-gray-200 text-gray-800 px-3 py-2 rounded-lg text-xs font-bold hover:bg-gray-300"
-            >
-              Cancelar
-            </button>
-          </div>
-        </div>
-      ),
-      { duration: Infinity, id: 'confirm-borrar' }
-    );
+    const nombre = tabla === 'celulares' ? item.modelo + ' ' + (item.capacidad || '') : item.tipo + ' - ' + item.modelo;
+    const botones = [{ etiqueta: 'Borrar 1 unidad', clase: 'bg-red-500 hover:bg-red-600', accion: () => ejecutarBorrado([item.ids[0]], tabla) }];
+    if (item.cantidad > 1) {
+      botones.push({
+        etiqueta: 'Borrar las ' + item.cantidad + ' unidades',
+        clase: 'bg-red-700 hover:bg-red-800',
+        accion: () => ejecutarBorrado(item.ids, tabla),
+      });
+    }
+    setDialogo({
+      titulo: 'Borrar del stock',
+      texto: nombre + (item.color ? ' - ' + item.color : '') + '. Esta accion no se puede deshacer.',
+      botones,
+    });
   };
 
   async function ejecutarBorrado(idsArray, tabla) {
@@ -1315,6 +1297,39 @@ function Admin() {
         </Fragment>
       )}
 
+      {/* DIALOGO DE CONFIRMACION */}
+      {dialogo && (
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100">
+            <h2 className="text-lg font-bold text-gray-900">{dialogo.titulo}</h2>
+            <p className="text-sm text-gray-600 mt-1 break-words">{dialogo.texto}</p>
+            <div className="flex flex-col gap-2 mt-4">
+              {dialogo.botones.map((boton) => (
+                <button
+                  key={boton.etiqueta}
+                  type="button"
+                  disabled={guardando}
+                  onClick={conBloqueo(async () => {
+                    setDialogo(null);
+                    await boton.accion();
+                  })}
+                  className={'text-white px-4 py-2.5 rounded-lg text-sm font-bold transition disabled:opacity-60 ' + boton.clase}
+                >
+                  {boton.etiqueta}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => setDialogo(null)}
+                className="bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-gray-300 transition"
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MODAL DE VENTA */}
       {venta && (
         <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
@@ -1407,10 +1422,13 @@ function Admin() {
       {showPermutaModal && (
         <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto">
-            <h2 className="text-xl font-bold mb-4 text-gray-800">Registrar Equipo en Permuta</h2>
+            <h2 className="text-xl font-bold text-gray-800">Registrar Permuta</h2>
+            <p className="text-xs font-bold text-purple-700 uppercase tracking-wide mt-3 mb-2">
+              1. Equipo que recibis (entra al stock)
+            </p>
             <form onSubmit={conBloqueo(handleGuardarPermuta)} autoComplete="off" className="grid grid-cols-2 gap-3">
               <div className="col-span-2">
-                <label className="text-xs font-bold text-gray-600 mb-1 block">Modelo del equipo usado</label>
+                <label className="text-xs font-bold text-gray-600 mb-1 block">Modelo</label>
                 <input required name="modelo" value={formPermuta.modelo} onChange={handleChangePermuta} type="text" placeholder="Ej: 11 PRO" className={claseInputModal} />
               </div>
               <div className="min-w-0">
@@ -1447,6 +1465,41 @@ function Admin() {
                     ? (formPermuta.precio_ars / cot).toFixed(2)
                     : '0.00'}
                 </p>
+              </div>
+              <div className="col-span-2 border-t border-gray-200 pt-3">
+                <p className="text-xs font-bold text-purple-700 uppercase tracking-wide mb-2">
+                  2. Equipo que entregas (sale del stock) - opcional
+                </p>
+                <select
+                  name="entregaId"
+                  value={formPermuta.entregaId}
+                  onChange={handleChangePermuta}
+                  className={claseInputModal + ' text-gray-700'}
+                >
+                  <option value="">No entrego equipo / lo cargo despues</option>
+                  {stockCelulares.map((c) => (
+                    <option key={c.ids[0]} value={c.ids[0]}>
+                      {c.modelo} {c.capacidad} {c.color} - Bat {c.bateria}% - ARS $ {fmt(Math.round(c.precio_usd * cot))} ({c.cantidad} u.)
+                    </option>
+                  ))}
+                </select>
+                {lotePermuta && (
+                  <div className="mt-2 bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs font-semibold text-gray-600">
+                    <div className="flex justify-between gap-2">
+                      <span>Precio del equipo que entregas</span>
+                      <span>ARS $ {fmt(Math.round(lotePermuta.precio_usd * cot))}</span>
+                    </div>
+                    <div className="flex justify-between gap-2 mt-1">
+                      <span>Menos el equipo que recibis</span>
+                      <span>ARS $ {fmt(Number(formPermuta.precio_ars) || 0)}</span>
+                    </div>
+                    <div className="flex justify-between gap-2 mt-1 text-sm font-black text-gray-900">
+                      <span>Diferencia a cobrar</span>
+                      <span>ARS $ {fmt(Math.round(lotePermuta.precio_usd * cot) - (Number(formPermuta.precio_ars) || 0))}</span>
+                    </div>
+                    <p className="mt-2 font-medium text-gray-500">Al guardar, una unidad de este equipo queda como vendida.</p>
+                  </div>
+                )}
               </div>
               <div className="col-span-2 flex gap-3 mt-1">
                 <button type="button" onClick={() => setShowPermutaModal(false)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
