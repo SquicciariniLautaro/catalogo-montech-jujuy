@@ -16,6 +16,19 @@ const sinTildes = (v) =>
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
 
+const TAMANO_PAGINA = 1000;
+
+// Supabase devuelve como maximo 1000 filas por consulta: se pide por paginas hasta traer todo
+async function traerTodo(armarConsulta) {
+  const filas = [];
+  for (let desde = 0; ; desde += TAMANO_PAGINA) {
+    const { data, error } = await armarConsulta().range(desde, desde + TAMANO_PAGINA - 1);
+    if (error) return { data: null, error };
+    filas.push(...data);
+    if (data.length < TAMANO_PAGINA) return { data: filas, error: null };
+  }
+}
+
 // Redondea a 2 decimales
 const redondear = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -44,12 +57,12 @@ function BotonConsultar({ href }) {
       href={href}
       target="_blank"
       rel="noreferrer"
-      className="inline-flex items-center justify-center gap-0.5 bg-white border border-green-500 text-green-700 rounded px-1 py-0.5 text-[9px] md:text-xs font-bold hover:bg-green-50 transition"
+      className="inline-flex items-center justify-center gap-0.5 bg-white border border-green-500 text-green-700 rounded-md px-1.5 py-1.5 text-[10px] md:text-xs font-bold hover:bg-green-50 transition"
     >
       <img
         src="/logo-whatsapp.png"
         alt=""
-        className="w-2.5 h-2.5 md:w-3 md:h-3 object-contain"
+        className="w-3 h-3 object-contain"
         onError={(e) => { e.target.style.display = 'none'; }}
       />
       Consultar
@@ -127,6 +140,7 @@ function Catalogo() {
   const [accesoriosAgrupados, setAccesoriosAgrupados] = useState([]);
   const [cotizacion, setCotizacion] = useState(1250);
   const [cargando, setCargando] = useState(true);
+  const [huboError, setHuboError] = useState(false);
   const [esAdmin, setEsAdmin] = useState(false);
   const [busqueda, setBusqueda] = useState('');
   const [tabActiva, setTabActiva] = useState('celulares');
@@ -149,23 +163,25 @@ function Catalogo() {
 
         if (configData) setCotizacion(Number(configData.cotizacion_dolar) || 1250);
 
-        const { data: celularesData } = await supabase
-          .from('catalogo_celulares')
-          .select('*');
+        const { data: celularesData, error: errorCelulares } = await traerTodo(() =>
+          supabase.from('catalogo_celulares').select('*').order('id')
+        );
 
         if (celularesData) {
           setCelularesAgrupados(agruparCatalogo(celularesData, claveCelular).sort(compararCelulares));
         }
 
-        const { data: accesoriosData } = await supabase
-          .from('catalogo_accesorios')
-          .select('*');
+        const { data: accesoriosData, error: errorAccesorios } = await traerTodo(() =>
+          supabase.from('catalogo_accesorios').select('*').order('id')
+        );
+        if (errorCelulares || errorAccesorios) setHuboError(true);
 
         if (accesoriosData) {
           setAccesoriosAgrupados(agruparCatalogo(accesoriosData, claveAccesorio).sort(compararAccesorios));
         }
       } catch (error) {
         console.error(error.message);
+        setHuboError(true);
       } finally {
         setCargando(false);
       }
@@ -285,6 +301,21 @@ function Catalogo() {
     return <div className="p-10 text-center font-bold text-gray-600">Cargando catalogo...</div>;
   }
 
+  if (huboError) {
+    return (
+      <div className="p-10 text-center">
+        <p className="font-bold text-gray-700">No pudimos cargar el catalogo.</p>
+        <p className="text-sm text-gray-500 mt-1">Revisa tu conexion a internet e intenta de nuevo.</p>
+        <button
+          onClick={() => window.location.reload()}
+          className="mt-4 bg-gray-900 text-white px-5 py-2.5 rounded-xl text-sm font-bold hover:bg-gray-800 transition"
+        >
+          Reintentar
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="relative p-1.5 max-w-4xl mx-auto font-sans bg-white pb-4 min-h-screen flex flex-col">
       {esAdmin && (
@@ -346,7 +377,7 @@ function Catalogo() {
         <div className="shadow-sm border border-gray-300 rounded-lg w-full overflow-hidden">
           <table className="w-full table-fixed border-collapse">
             <thead>
-              <tr className="bg-[#e4ecfa] border-b border-gray-300 text-gray-900 text-[8px] md:text-[11px] uppercase font-bold tracking-tight">
+              <tr className="bg-[#e4ecfa] border-b border-gray-300 text-gray-900 text-[9px] md:text-[11px] uppercase font-bold tracking-tight">
                 <th className="py-1.5 px-0.5 text-center w-[8%]">Cant</th>
                 <th className="py-1.5 px-1 text-left w-[38%]">Modelo / Color</th>
                 <th className="py-1.5 px-0.5 text-center w-[10%]">Bat</th>
@@ -383,23 +414,23 @@ function Catalogo() {
                       (fila.zebra ? 'bg-white' : 'bg-gray-50')
                     }
                   >
-                    <td className="py-1 px-0.5 text-center font-bold text-blue-600 bg-blue-50 text-[10px]">
+                    <td className="py-1 px-0.5 text-center font-bold text-blue-600 bg-blue-50 text-[11px]">
                       {celu.cantidad}
                     </td>
                     <td className="py-1 px-1 align-middle break-words">
-                      <div className="font-bold text-gray-800 text-[10px] md:text-[13px] leading-tight">
+                      <div className="font-bold text-gray-800 text-xs md:text-[13px] leading-tight">
                         {celu.modelo}
-                        <span className="font-medium text-gray-500 text-[8px] md:text-xs ml-1">{celu.capacidad}</span>
+                        <span className="font-medium text-gray-500 text-[10px] md:text-xs ml-1">{celu.capacidad}</span>
                         {renderizarCirculoColor(celu.color)}
                       </div>
                       {celu.detalles && (
-                        <div className="text-[8px] md:text-[11px] text-gray-500 leading-tight mt-0.5">{celu.detalles}</div>
+                        <div className="text-[9px] md:text-[11px] text-gray-500 leading-tight mt-0.5">{celu.detalles}</div>
                       )}
                     </td>
-                    <td className="py-1 px-0.5 text-center font-medium text-gray-600 text-[9px] md:text-xs">
+                    <td className="py-1 px-0.5 text-center font-medium text-gray-600 text-[10px] md:text-xs">
                       {celu.bateria ? celu.bateria + '%' : '-'}
                     </td>
-                    <td className="py-1 px-1 text-right font-bold text-gray-900 text-[10px] md:text-sm leading-tight whitespace-nowrap">
+                    <td className="py-1 px-1 text-right font-bold text-gray-900 text-[11px] md:text-sm leading-tight whitespace-nowrap">
                       $ {Math.round(precioPesos).toLocaleString('es-AR')}
                     </td>
                     <td className="py-1 px-0.5 text-center">
@@ -418,7 +449,7 @@ function Catalogo() {
         <div className="shadow-sm border border-gray-300 rounded-lg w-full overflow-hidden">
           <table className="w-full table-fixed border-collapse">
             <thead>
-              <tr className="bg-[#e4ecfa] border-b border-gray-300 text-gray-900 text-[8px] md:text-[11px] uppercase font-bold tracking-tight">
+              <tr className="bg-[#e4ecfa] border-b border-gray-300 text-gray-900 text-[9px] md:text-[11px] uppercase font-bold tracking-tight">
                 <th className="py-1.5 px-0.5 text-center w-[8%]">Cant</th>
                 <th className="py-1.5 px-1 text-left w-[48%]">Accesorio / Color</th>
                 <th className="py-1.5 px-1 text-right w-[21%]">Precio</th>
@@ -456,20 +487,20 @@ function Catalogo() {
                       (fila.zebra ? 'bg-white' : 'bg-gray-50')
                     }
                   >
-                    <td className="py-1 px-0.5 text-center font-bold text-blue-600 bg-blue-50 text-[10px]">
+                    <td className="py-1 px-0.5 text-center font-bold text-blue-600 bg-blue-50 text-[11px]">
                       {acc.cantidad}
                     </td>
                     <td className="py-1 px-1 align-middle break-words">
-                      <div className="font-bold text-gray-800 text-[10px] md:text-[13px] leading-tight">
+                      <div className="font-bold text-gray-800 text-xs md:text-[13px] leading-tight">
                         {acc.tipo}
-                        <span className="font-medium text-gray-500 text-[8px] md:text-xs ml-1">{acc.modelo}</span>
+                        <span className="font-medium text-gray-500 text-[10px] md:text-xs ml-1">{acc.modelo}</span>
                         {renderizarCirculoColor(acc.color)}
                       </div>
                       {acc.detalles && (
-                        <div className="text-[8px] md:text-[11px] text-gray-500 leading-tight mt-0.5">{acc.detalles}</div>
+                        <div className="text-[9px] md:text-[11px] text-gray-500 leading-tight mt-0.5">{acc.detalles}</div>
                       )}
                     </td>
-                    <td className="py-1 px-1 text-right font-bold text-gray-900 text-[10px] md:text-sm leading-tight whitespace-nowrap">
+                    <td className="py-1 px-1 text-right font-bold text-gray-900 text-[11px] md:text-sm leading-tight whitespace-nowrap">
                       $ {Math.round(precioPesos).toLocaleString('es-AR')}
                     </td>
                     <td className="py-1 px-0.5 text-center">

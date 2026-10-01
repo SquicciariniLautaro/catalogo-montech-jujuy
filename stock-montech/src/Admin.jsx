@@ -1,4 +1,4 @@
-import { useState, useEffect, Fragment } from 'react';
+import { useState, useEffect, useRef, Fragment } from 'react';
 import { supabase } from './supabase';
 import toast from 'react-hot-toast';
 import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer } from 'recharts';
@@ -145,12 +145,24 @@ const agruparStock = (filas, claveFn, compararFn) => {
     .sort(compararFn);
 };
 
+const TAMANO_PAGINA = 1000;
+
+// Supabase devuelve como maximo 1000 filas por consulta: se pide por paginas hasta traer todo
+async function traerTodo(armarConsulta) {
+  const filas = [];
+  for (let desde = 0; ; desde += TAMANO_PAGINA) {
+    const { data, error } = await armarConsulta().range(desde, desde + TAMANO_PAGINA - 1);
+    if (error) return { data: null, error };
+    filas.push(...data);
+    if (data.length < TAMANO_PAGINA) return { data: filas, error: null };
+  }
+}
+
 // Inserta unidades nuevas y unifica costo y precio del lote con el promedio ponderado
 async function guardarLoteConPromedio(tabla, filaBase, cantidad, claveFn) {
-  const { data: existentes, error: errorBusqueda } = await supabase
-    .from(tabla)
-    .select('*')
-    .eq('estado', 'disponible');
+  const { data: existentes, error: errorBusqueda } = await traerTodo(() =>
+    supabase.from(tabla).select('*').eq('estado', 'disponible').order('id')
+  );
   if (errorBusqueda) return { error: errorBusqueda };
 
   const claveNueva = claveFn(filaBase);
@@ -283,7 +295,7 @@ function DatoStock({ etiqueta, valor, clase }) {
 }
 
 // Titulo de la seccion de stock y, en escritorio, nombres de las columnas
-function EncabezadoStock({ titulo, columna, stats, lotes }) {
+function EncabezadoStock({ titulo, columna, stats, lotes, busqueda, onBusqueda }) {
   return (
     <Fragment>
       <div className="px-3 md:px-4 py-3 border-b border-gray-200 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
@@ -291,6 +303,16 @@ function EncabezadoStock({ titulo, columna, stats, lotes }) {
         <span className="text-xs font-semibold text-gray-500">
           {stats.totalQty} unidad(es) en {lotes} lote(s)
         </span>
+      </div>
+      <div className="px-3 md:px-4 py-2 border-b border-gray-200">
+        <input
+          type="search"
+          value={busqueda}
+          onChange={(e) => onBusqueda(e.target.value)}
+          placeholder="Buscar en el stock"
+          aria-label="Buscar en el stock"
+          className="w-full min-w-0 border border-gray-200 rounded-lg bg-gray-50 focus:bg-white px-3 py-2 text-base md:text-sm outline-none focus:border-blue-500"
+        />
       </div>
       <div className={'hidden px-4 py-2 bg-gray-50 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wide ' + COLUMNAS_STOCK}>
         <span>{columna}</span>
@@ -399,8 +421,30 @@ function Admin() {
   const [paginaActual, setPaginaActual] = useState(1);
   const [menu, setMenu] = useState(null); // { key, item, tabla, top, right }
   const [venta, setVenta] = useState(null); // { item, tabla, cantidad, mayorista }
+  const [busquedaStock, setBusquedaStock] = useState('');
+  const [guardando, setGuardando] = useState(false);
+  const ocupado = useRef(false);
 
   const cot = Number(cotizacion) || 0;
+
+  // Evita que un doble toque dispare dos veces la misma operacion (por ejemplo, duplicar un ingreso)
+  const conBloqueo = (fn) => async (...args) => {
+    if (args[0] && typeof args[0].preventDefault === 'function') args[0].preventDefault();
+    if (ocupado.current) return;
+    ocupado.current = true;
+    setGuardando(true);
+    try {
+      await fn(...args);
+    } finally {
+      ocupado.current = false;
+      setGuardando(false);
+    }
+  };
+
+  const cambiarTab = (tab) => {
+    setActiveTab(tab);
+    setBusquedaStock('');
+  };
 
   useEffect(() => {
     document.title = 'Montech | Admin';
@@ -426,10 +470,10 @@ function Admin() {
     // con el mismo criterio del catalogo publico (modelo, capacidad, color, precio)
     const [config, celDisponibles, accDisponibles, celVendidos, accVendidos] = await Promise.all([
       supabase.from('configuracion').select('*').eq('id', 1).single(),
-      supabase.from('celulares').select('*').eq('estado', 'disponible').order('modelo', { ascending: true }),
-      supabase.from('accesorios').select('*').eq('estado', 'disponible').order('tipo', { ascending: true }).order('modelo', { ascending: true }),
-      supabase.from('celulares').select('*').eq('estado', 'vendido'),
-      supabase.from('accesorios').select('*').eq('estado', 'vendido'),
+      traerTodo(() => supabase.from('celulares').select('*').eq('estado', 'disponible').order('modelo', { ascending: true }).order('id')),
+      traerTodo(() => supabase.from('accesorios').select('*').eq('estado', 'disponible').order('tipo', { ascending: true }).order('id')),
+      traerTodo(() => supabase.from('celulares').select('*').eq('estado', 'vendido').order('id')),
+      traerTodo(() => supabase.from('accesorios').select('*').eq('estado', 'vendido').order('id')),
     ]);
 
     const fallo = [config, celDisponibles, accDisponibles, celVendidos, accVendidos].find((r) => r.error);
@@ -624,6 +668,44 @@ function Admin() {
     cargarDatos(false);
   }
 
+  // Anular una venta cargada por error: la unidad vuelve al stock
+  const confirmarAnulacion = (item) => {
+    toast(
+      (t) => (
+        <div>
+          <p className="font-bold text-gray-800 text-sm mb-1">Anular esta venta?</p>
+          <p className="text-xs text-gray-600 mb-3">La unidad vuelve al stock disponible.</p>
+          <div className="flex justify-end gap-2">
+            <button
+              onClick={() => { toast.dismiss(t.id); conBloqueo(anularVenta)(item); }}
+              className="bg-red-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-600"
+            >
+              Anular
+            </button>
+            <button
+              onClick={() => toast.dismiss(t.id)}
+              className="bg-gray-200 text-gray-800 px-3 py-2 rounded-lg text-xs font-bold hover:bg-gray-300"
+            >
+              Cancelar
+            </button>
+          </div>
+        </div>
+      ),
+      { duration: Infinity, id: 'confirm-anular' }
+    );
+  };
+
+  async function anularVenta(item) {
+    const tabla = item.categoria === 'celular' ? 'celulares' : 'accesorios';
+    const { error } = await supabase.from(tabla).update({ estado: 'disponible', fecha_venta: null }).eq('id', item.id);
+    if (error) {
+      toast.error('Error al anular la venta: ' + error.message);
+      return;
+    }
+    toast.success('Venta anulada, la unidad volvio al stock');
+    cargarDatos(false);
+  }
+
   // ---------- Borrado ----------
   const confirmarBorrado = (item, tabla) => {
     toast(
@@ -632,14 +714,14 @@ function Admin() {
           <p className="font-bold text-gray-800 text-sm mb-3">Cuantas unidades queres borrar?</p>
           <div className="flex flex-wrap justify-end gap-2">
             <button
-              onClick={() => { toast.dismiss(t.id); ejecutarBorrado([item.ids[0]], tabla); }}
+              onClick={() => { toast.dismiss(t.id); conBloqueo(ejecutarBorrado)([item.ids[0]], tabla); }}
               className="bg-red-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-600"
             >
               Borrar 1
             </button>
             {item.cantidad > 1 && (
               <button
-                onClick={() => { toast.dismiss(t.id); ejecutarBorrado(item.ids, tabla); }}
+                onClick={() => { toast.dismiss(t.id); conBloqueo(ejecutarBorrado)(item.ids, tabla); }}
                 className="bg-red-700 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-800"
               >
                 Borrar TODOS
@@ -757,6 +839,18 @@ function Admin() {
   const statsCelulares = calcularStats(stockCelulares, cot);
   const statsAccesorios = calcularStats(stockAccesorios, cot);
 
+  // Buscador del stock: todas las palabras escritas deben aparecer en alguno de los campos
+  const filtrarStock = (lista, campos) => {
+    const palabras = sinTildes(busquedaStock).split(/\s+/).filter(Boolean);
+    if (palabras.length === 0) return lista;
+    return lista.filter((item) => {
+      const texto = sinTildes(campos.map((c) => item[c]).join(' '));
+      return palabras.every((p) => texto.includes(p));
+    });
+  };
+  const celularesVisibles = filtrarStock(stockCelulares, ['modelo', 'capacidad', 'color', 'detalles']);
+  const accesoriosVisibles = filtrarStock(stockAccesorios, ['tipo', 'modelo', 'color', 'detalles']);
+
   const mesesDisponibles = [...new Set(ventasGlobales.map((v) => obtenerMesAnio(v.fecha_venta)))]
     .filter((m) => m !== 'Sin fecha')
     .sort()
@@ -793,7 +887,7 @@ function Admin() {
     'flex-1 md:flex-none py-3 px-6 text-sm font-bold rounded-t-lg transition ' +
     (activeTab === tab ? 'bg-white border-t border-l border-r border-gray-200 text-blue-600' : 'text-gray-500 hover:bg-gray-100');
 
-  const claseBotonAgregar = 'flex-1 bg-blue-600 text-white py-3 md:py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition text-sm';
+  const claseBotonAgregar = 'flex-1 bg-blue-600 text-white py-3 md:py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition text-sm disabled:opacity-60';
 
   return (
     <div className="min-h-screen p-3 md:p-8 text-gray-800 bg-gray-50 overflow-x-hidden">
@@ -845,7 +939,7 @@ function Admin() {
             />
           </label>
           <button
-            onClick={handleActualizarConfiguracion}
+            onClick={conBloqueo(handleActualizarConfiguracion)}
             className="col-span-2 bg-gray-900 text-white px-4 py-2.5 md:py-2 rounded-lg text-sm font-medium hover:bg-gray-800 transition"
           >
             Guardar
@@ -856,8 +950,8 @@ function Admin() {
       <div className="flex flex-col gap-6 md:gap-8 max-w-6xl mx-auto w-full">
         {/* TABS */}
         <div className="flex gap-2 border-b border-gray-200">
-          <button onClick={() => setActiveTab('celulares')} className={claseTab('celulares')}>Celulares</button>
-          <button onClick={() => setActiveTab('accesorios')} className={claseTab('accesorios')}>Accesorios</button>
+          <button onClick={() => cambiarTab('celulares')} className={claseTab('celulares')}>Celulares</button>
+          <button onClick={() => cambiarTab('accesorios')} className={claseTab('accesorios')}>Accesorios</button>
         </div>
 
         {/* ===================== TAB CELULARES ===================== */}
@@ -865,7 +959,7 @@ function Admin() {
           <div className="space-y-4 md:space-y-6">
             <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200">
               <h2 className="text-lg font-bold mb-4 md:mb-5 text-gray-800">Nuevo Ingreso de Celular</h2>
-              <form onSubmit={handleGuardarCelular} autoComplete="off" className="flex flex-col md:flex-row gap-3">
+              <form onSubmit={conBloqueo(handleGuardarCelular)} autoComplete="off" className="flex flex-col md:flex-row gap-3">
                 <div className="flex-1 grid grid-cols-2 md:grid-cols-4 gap-3">
                   <input required name="modelo" value={formCelular.modelo} onChange={handleChangeCelular} type="text" placeholder="Mod. (Ej: 14 PRO)" className={claseInput} />
                   <input required name="capacidad" value={formCelular.capacidad} onChange={handleChangeCelular} type="text" placeholder="Cap. (Ej: 128)" className={claseInput} />
@@ -885,7 +979,7 @@ function Admin() {
                     <span className="absolute left-3 top-3 text-gray-500 text-sm font-semibold">Cant:</span>
                     <input required name="cantidad" value={formCelular.cantidad} onChange={handleChangeCelular} type="number" min="1" className={claseInput + ' pl-12 font-bold'} />
                   </div>
-                  <button type="submit" className={claseBotonAgregar}>Agregar</button>
+                  <button type="submit" disabled={guardando} className={claseBotonAgregar}>{guardando ? 'Guardando...' : 'Agregar'}</button>
                 </div>
               </form>
               <p className="text-[11px] text-gray-400 mt-3">
@@ -896,9 +990,9 @@ function Admin() {
             <ResumenStock etiqueta="Total Celulares" stats={statsCelulares} />
 
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-              <EncabezadoStock titulo="Stock de Celulares" columna="Equipo" stats={statsCelulares} lotes={stockCelulares.length} />
+              <EncabezadoStock titulo="Stock de Celulares" columna="Equipo" stats={statsCelulares} lotes={stockCelulares.length} busqueda={busquedaStock} onBusqueda={setBusquedaStock} />
               <div className="divide-y divide-gray-100 md:max-h-[400px] md:overflow-y-auto">
-                {stockCelulares.map((celu) =>
+                {celularesVisibles.map((celu) =>
                   editandoCelularId === celu.ids[0] ? (
                     <div key={celu.ids[0]} className="p-3 md:p-4 bg-blue-50/40">
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
@@ -928,7 +1022,7 @@ function Admin() {
                         cantidad={celu.cantidad}
                         valor={formEdicionCelular.cantidadAEditar}
                         onChange={handleChangeEdicionCelular}
-                        onGuardar={guardarEdicionCelular}
+                        onGuardar={conBloqueo(guardarEdicionCelular)}
                         onCancelar={() => setEditandoCelularId(null)}
                       />
                     </div>
@@ -944,7 +1038,11 @@ function Admin() {
                   )
                 )}
               </div>
-              {stockCelulares.length === 0 && <p className="text-center p-8 text-gray-500">No hay celulares en stock.</p>}
+              {celularesVisibles.length === 0 && (
+                <p className="text-center p-8 text-gray-500">
+                  {stockCelulares.length === 0 ? 'No hay celulares en stock.' : 'Ningun equipo coincide con la busqueda.'}
+                </p>
+              )}
             </div>
           </div>
         )}
@@ -954,7 +1052,7 @@ function Admin() {
           <div className="space-y-4 md:space-y-6">
             <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200">
               <h2 className="text-lg font-bold mb-4 md:mb-5 text-gray-800">Nuevo Ingreso de Accesorio</h2>
-              <form onSubmit={handleGuardarAccesorio} autoComplete="off" className="flex flex-col md:flex-row gap-3">
+              <form onSubmit={conBloqueo(handleGuardarAccesorio)} autoComplete="off" className="flex flex-col md:flex-row gap-3">
                 <div className="flex-1 grid grid-cols-2 md:grid-cols-3 gap-3">
                   <input required name="tipo" value={formAccesorio.tipo} onChange={handleChangeAccesorio} type="text" placeholder="Tipo (Ej: Funda)" className={claseInput} />
                   <input required name="modelo" value={formAccesorio.modelo} onChange={handleChangeAccesorio} type="text" placeholder="Mod. (Ej: iPhone 13)" className={claseInput} />
@@ -973,7 +1071,7 @@ function Admin() {
                     <span className="absolute left-3 top-3 text-gray-500 text-sm font-semibold">Cant:</span>
                     <input required name="cantidad" value={formAccesorio.cantidad} onChange={handleChangeAccesorio} type="number" min="1" className={claseInput + ' pl-12 font-bold'} />
                   </div>
-                  <button type="submit" className={claseBotonAgregar}>Agregar</button>
+                  <button type="submit" disabled={guardando} className={claseBotonAgregar}>{guardando ? 'Guardando...' : 'Agregar'}</button>
                 </div>
               </form>
               <p className="text-[11px] text-gray-400 mt-3">
@@ -984,9 +1082,9 @@ function Admin() {
             <ResumenStock etiqueta="Total Accesorios" stats={statsAccesorios} />
 
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-              <EncabezadoStock titulo="Stock de Accesorios" columna="Accesorio" stats={statsAccesorios} lotes={stockAccesorios.length} />
+              <EncabezadoStock titulo="Stock de Accesorios" columna="Accesorio" stats={statsAccesorios} lotes={stockAccesorios.length} busqueda={busquedaStock} onBusqueda={setBusquedaStock} />
               <div className="divide-y divide-gray-100 md:max-h-[400px] md:overflow-y-auto">
-                {stockAccesorios.map((acc) =>
+                {accesoriosVisibles.map((acc) =>
                   editandoAccesorioId === acc.ids[0] ? (
                     <div key={acc.ids[0]} className="p-3 md:p-4 bg-blue-50/40">
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
@@ -1013,7 +1111,7 @@ function Admin() {
                         cantidad={acc.cantidad}
                         valor={formEdicionAccesorio.cantidadAEditar}
                         onChange={handleChangeEdicionAccesorio}
-                        onGuardar={guardarEdicionAccesorio}
+                        onGuardar={conBloqueo(guardarEdicionAccesorio)}
                         onCancelar={() => setEditandoAccesorioId(null)}
                       />
                     </div>
@@ -1029,7 +1127,11 @@ function Admin() {
                   )
                 )}
               </div>
-              {stockAccesorios.length === 0 && <p className="text-center p-8 text-gray-500">No hay accesorios en stock.</p>}
+              {accesoriosVisibles.length === 0 && (
+                <p className="text-center p-8 text-gray-500">
+                  {stockAccesorios.length === 0 ? 'No hay accesorios en stock.' : 'Ningun accesorio coincide con la busqueda.'}
+                </p>
+              )}
             </div>
           </div>
         )}
@@ -1072,7 +1174,7 @@ function Admin() {
               <p className="text-xl md:text-3xl font-black mt-1 text-green-600 break-words">$ {fmt(gananciaVentasUSD)}</p>
             </div>
             <div className="min-w-0 bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-emerald-400 col-span-2 md:col-span-1">
-              <p className="text-gray-500 text-xs md:text-sm font-medium">Ganancia (ARS)</p>
+              <p className="text-gray-500 text-xs md:text-sm font-medium">Ganancia (ARS, al dolar de hoy)</p>
               <p className="text-xl md:text-3xl font-black mt-1 text-emerald-600 break-words">$ {fmt(gananciaVentasARS)}</p>
             </div>
           </div>
@@ -1110,14 +1212,22 @@ function Admin() {
                           <CirculoColor color={item.color} />
                         </div>
                       </div>
-                      <span
-                        className={
-                          'shrink-0 font-bold text-sm px-2 py-1 rounded whitespace-nowrap ' +
-                          (ganancia < 0 ? 'text-red-600 bg-red-50' : 'text-green-600 bg-green-50')
-                        }
-                      >
-                        {ganancia < 0 ? '-' : '+'} $ {fmt(Math.abs(ganancia))}
-                      </span>
+                      <div className="shrink-0 flex flex-col items-end gap-1">
+                        <span
+                          className={
+                            'font-bold text-sm px-2 py-1 rounded whitespace-nowrap ' +
+                            (ganancia < 0 ? 'text-red-600 bg-red-50' : 'text-green-600 bg-green-50')
+                          }
+                        >
+                          {ganancia < 0 ? '-' : '+'} $ {fmt(Math.abs(ganancia))}
+                        </span>
+                        <button
+                          onClick={() => confirmarAnulacion(item)}
+                          className="text-[11px] font-bold text-gray-400 hover:text-red-500 hover:underline py-1"
+                        >
+                          Anular venta
+                        </button>
+                      </div>
                     </div>
                   );
                 })}
@@ -1285,7 +1395,7 @@ function Admin() {
               <button type="button" onClick={() => setVenta(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
                 Cancelar
               </button>
-              <button type="button" onClick={ejecutarVenta} className="flex-1 bg-green-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-green-700 transition">
+              <button type="button" onClick={conBloqueo(ejecutarVenta)} disabled={guardando} className="disabled:opacity-60 flex-1 bg-green-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-green-700 transition">
                 Confirmar
               </button>
             </div>
@@ -1298,7 +1408,7 @@ function Admin() {
         <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto">
             <h2 className="text-xl font-bold mb-4 text-gray-800">Registrar Equipo en Permuta</h2>
-            <form onSubmit={handleGuardarPermuta} autoComplete="off" className="grid grid-cols-2 gap-3">
+            <form onSubmit={conBloqueo(handleGuardarPermuta)} autoComplete="off" className="grid grid-cols-2 gap-3">
               <div className="col-span-2">
                 <label className="text-xs font-bold text-gray-600 mb-1 block">Modelo del equipo usado</label>
                 <input required name="modelo" value={formPermuta.modelo} onChange={handleChangePermuta} type="text" placeholder="Ej: 11 PRO" className={claseInputModal} />
@@ -1342,7 +1452,7 @@ function Admin() {
                 <button type="button" onClick={() => setShowPermutaModal(false)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
                   Cancelar
                 </button>
-                <button type="submit" className="flex-1 bg-purple-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-purple-700 transition">
+                <button type="submit" disabled={guardando} className="disabled:opacity-60 flex-1 bg-purple-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-purple-700 transition">
                   Guardar Permuta
                 </button>
               </div>
