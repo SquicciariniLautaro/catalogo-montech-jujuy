@@ -1,32 +1,56 @@
-import React, { useState, useEffect, Fragment } from 'react';
+import { useState, useEffect, Fragment } from 'react';
 import { supabase } from './supabase';
 import toast from 'react-hot-toast';
 import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer } from 'recharts';
 
 const COLORES = [
-  ['Negro', 'Negro'],
-  ['Blanco', 'Blanco'],
-  ['Plata', 'Plata'],
-  ['Gris', 'Gris'],
-  ['Oro', 'Oro'],
-  ['Rosa', 'Rosa'],
-  ['Azul', 'Azul'],
-  ['Morado', 'Morado / Purpura'],
-  ['Verde', 'Verde'],
-  ['Amarillo', 'Amarillo'],
-  ['Naranja', 'Naranja'],
-  ['Rojo', 'Rojo'],
-  ['Titanio', 'Titanio Natural'],
-  ['Titanio del Desierto', 'Titanio del Desierto'],
+  'Negro',
+  'Blanco',
+  'Plata',
+  'Gris',
+  'Oro',
+  'Rosa',
+  'Azul',
+  'Morado',
+  'Verde',
+  'Amarillo',
+  'Naranja',
+  'Rojo',
+  'Titanio',
+  'Titanio del Desierto',
 ];
 
-function IconoChevron() {
-  return (
-    <svg className="w-3 h-3 inline-block ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M19 9l-7 7-7-7" />
-    </svg>
-  );
-}
+// Palabras clave -> clase de Tailwind. El orden importa: gana la primera coincidencia.
+const PALETA = [
+  [['negro', 'medianoche', 'black', 'midnight'], 'bg-gray-900'],
+  [['blanco', 'estelar', 'white', 'starlight'], 'bg-white border border-gray-300'],
+  [['plata', 'silver', 'titanio'], 'bg-gray-300'],
+  [['gris', 'grafito', 'gray', 'grey', 'space'], 'bg-gray-600'],
+  [['rosa', 'pink'], 'bg-pink-300'],
+  [['oro', 'dorado', 'gold', 'desierto'], 'bg-yellow-200'],
+  [['azul', 'celeste', 'blue'], 'bg-blue-500'],
+  [['morado', 'violeta', 'purpura', 'lila', 'purple'], 'bg-purple-600'],
+  [['verde', 'green'], 'bg-emerald-500'],
+  [['amarillo', 'yellow'], 'bg-yellow-400'],
+  [['naranja', 'orange'], 'bg-orange-500'],
+  [['rojo', 'red'], 'bg-red-600'],
+];
+
+const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+const VENTAS_POR_PAGINA = 10;
+const ALTO_MENU = 140;
+
+// Columnas compartidas por el encabezado y las filas del stock en escritorio
+const COLUMNAS_STOCK = 'md:grid md:grid-cols-[minmax(0,1fr)_12rem_8rem] md:gap-4 md:items-center';
+
+const claseInput = 'border border-gray-200 p-2.5 rounded-lg bg-gray-50 focus:bg-white outline-none w-full min-w-0';
+const claseInputModal = 'border border-gray-300 p-2.5 rounded-lg w-full min-w-0 bg-gray-50 focus:bg-white outline-none';
+const claseInputEdicion = 'mt-1 border border-gray-300 p-2 rounded-lg w-full min-w-0 bg-white text-gray-800 text-base md:text-sm font-medium normal-case outline-none focus:border-blue-500';
+
+const fmt = (n) => Number(n).toLocaleString('es-AR', { maximumFractionDigits: 2 });
+
+// Redondea a 2 decimales
+const redondear = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 // Normaliza texto para comparar: quita caracteres raros, espacios repetidos y pasa a mayusculas
 const normalizar = (v) =>
@@ -40,24 +64,55 @@ const normalizar = (v) =>
 const sinTildes = (v) =>
   String(v === null || v === undefined ? '' : v)
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[̀-ͯ]/g, '')
     .toLowerCase();
 
-// Devuelve el nombre canonico del color si coincide con la lista (sin importar mayusculas)
+// Devuelve el nombre canonico del color si coincide con la lista (sin importar mayusculas).
+// Si no coincide, conserva el texto tal cual para no perder colores personalizados.
 const colorCanonico = (valor) => {
-  const v = String(valor || '').trim().toLowerCase();
-  const encontrado = COLORES.find(([clave]) => clave.toLowerCase() === v);
-  return encontrado ? encontrado[0] : String(valor || '').trim();
+  const v = String(valor || '').trim();
+  const encontrado = COLORES.find((c) => c.toLowerCase() === v.toLowerCase());
+  return encontrado || v;
 };
 
-// La clave de lote NO incluye el costo: el costo se promedia
+// Formatea capacidad: agrega GB solo si el valor es numerico
+const formatearCapacidad = (valor) => {
+  const v = String(valor || '').trim().toUpperCase();
+  if (/^\d+$/.test(v)) return v + 'GB';
+  return v;
+};
+
+// Convierte "128GB" o "1TB" a un numero comparable
+const capacidadANumero = (cap) => {
+  const m = String(cap || '').toUpperCase().match(/(\d+(?:[.,]\d+)?)\s*(TB|GB)?/);
+  if (!m) return 0;
+  const n = parseFloat(m[1].replace(',', '.'));
+  return m[2] === 'TB' ? n * 1000 : n;
+};
+
+const comparar = (a, b) => String(a || '').localeCompare(String(b || ''), 'es', { numeric: true, sensitivity: 'base' });
+
+// Mismo orden que el catalogo publico: modelo, capacidad, color, precio
+const compararCelulares = (a, b) =>
+  comparar(a.modelo, b.modelo) ||
+  capacidadANumero(a.capacidad) - capacidadANumero(b.capacidad) ||
+  comparar(a.color, b.color) ||
+  (Number(a.precio_usd) || 0) - (Number(b.precio_usd) || 0);
+
+// Mismo orden que el catalogo publico: tipo, modelo, color, precio
+const compararAccesorios = (a, b) =>
+  comparar(a.tipo, b.tipo) ||
+  comparar(a.modelo, b.modelo) ||
+  comparar(a.color, b.color) ||
+  (Number(a.precio_usd) || 0) - (Number(b.precio_usd) || 0);
+
+// La clave de lote NO incluye costo ni precio: ambos se promedian
 const claveCelular = (c) =>
   [
     normalizar(c.modelo),
     normalizar(c.capacidad),
     normalizar(c.color),
     Number(c.bateria) || 0,
-    Number(c.precio_usd) || 0,
     normalizar(c.detalles),
   ].join('|');
 
@@ -66,31 +121,32 @@ const claveAccesorio = (a) =>
     normalizar(a.tipo),
     normalizar(a.modelo),
     normalizar(a.color),
-    Number(a.precio_usd) || 0,
     normalizar(a.detalles),
   ].join('|');
 
-// Agrupa filas iguales y muestra el costo promedio ponderado del lote
-const agruparStock = (filas, claveFn) => {
-  const grupos = {};
-  filas.forEach((f) => {
+// Agrupa las unidades iguales en una sola fila y las ordena. Cada registro de la BD es una
+// unidad, por lo que total / cantidad es el promedio ponderado de costo y de precio del lote.
+const agruparStock = (filas, claveFn, compararFn) => {
+  const grupos = filas.reduce((acc, f) => {
     const k = claveFn(f);
-    if (!grupos[k]) grupos[k] = { ...f, cantidad: 0, ids: [], costoTotal: 0 };
-    grupos[k].cantidad += 1;
-    grupos[k].ids.push(f.id);
-    grupos[k].costoTotal += Number(f.costo_usd) || 0;
-  });
-  return Object.values(grupos).map((g) => {
-    const promedio = parseFloat((g.costoTotal / g.cantidad).toFixed(2));
-    const { costoTotal, ...resto } = g;
-    return { ...resto, costo_usd: promedio };
-  });
+    if (!acc[k]) acc[k] = { ...f, cantidad: 0, ids: [], costoTotal: 0, precioTotal: 0 };
+    acc[k].cantidad += 1;
+    acc[k].ids.push(f.id);
+    acc[k].costoTotal += Number(f.costo_usd) || 0;
+    acc[k].precioTotal += Number(f.precio_usd) || 0;
+    return acc;
+  }, {});
+  return Object.values(grupos)
+    .map((g) => ({
+      ...g,
+      costo_usd: redondear(g.costoTotal / g.cantidad),
+      precio_usd: redondear(g.precioTotal / g.cantidad),
+    }))
+    .sort(compararFn);
 };
 
-// Inserta unidades nuevas y unifica el costo del lote con el promedio ponderado
+// Inserta unidades nuevas y unifica costo y precio del lote con el promedio ponderado
 async function guardarLoteConPromedio(tabla, filaBase, cantidad, claveFn) {
-  const costoNuevo = Number(filaBase.costo_usd);
-
   const { data: existentes, error: errorBusqueda } = await supabase
     .from(tabla)
     .select('*')
@@ -99,28 +155,189 @@ async function guardarLoteConPromedio(tabla, filaBase, cantidad, claveFn) {
 
   const claveNueva = claveFn(filaBase);
   const mismos = (existentes || []).filter((e) => claveFn(e) === claveNueva);
-  const costoActual = mismos.reduce((acc, e) => acc + (Number(e.costo_usd) || 0), 0);
-  const promedio = parseFloat(((costoActual + costoNuevo * cantidad) / (mismos.length + cantidad)).toFixed(2));
+  const total = mismos.length + cantidad;
+  const promediar = (campo) =>
+    redondear((mismos.reduce((acc, e) => acc + (Number(e[campo]) || 0), 0) + filaBase[campo] * cantidad) / total);
+  const costo = promediar('costo_usd');
+  const precio = promediar('precio_usd');
 
   const nuevos = Array.from({ length: cantidad }, () => ({
     ...filaBase,
-    costo_usd: promedio,
+    costo_usd: costo,
+    precio_usd: precio,
     estado: 'disponible',
   }));
 
   const { error } = await supabase.from(tabla).insert(nuevos);
   if (error) return { error };
 
-  const idsDesactualizados = mismos.filter((e) => Number(e.costo_usd) !== promedio).map((e) => e.id);
+  const idsDesactualizados = mismos
+    .filter((e) => Number(e.costo_usd) !== costo || Number(e.precio_usd) !== precio)
+    .map((e) => e.id);
   if (idsDesactualizados.length > 0) {
     const { error: errorUpdate } = await supabase
       .from(tabla)
-      .update({ costo_usd: promedio })
+      .update({ costo_usd: costo, precio_usd: precio })
       .in('id', idsDesactualizados);
     if (errorUpdate) return { error: errorUpdate };
   }
 
-  return { error: null, promedio, unificadas: mismos.length };
+  return { error: null, costo, precio, unificadas: mismos.length };
+}
+
+const calcularStats = (arrayStock, cot) => {
+  const totalQty = arrayStock.reduce((acc, item) => acc + item.cantidad, 0);
+  const totalCosto = arrayStock.reduce((acc, item) => acc + item.costoTotal, 0);
+  const totalVenta = arrayStock.reduce((acc, item) => acc + item.precioTotal, 0);
+  const gananciaUsd = totalVenta - totalCosto;
+  return { totalQty, totalCosto, totalVenta, gananciaUsd, gananciaArs: gananciaUsd * cot };
+};
+
+const obtenerMesAnio = (fechaISO) => {
+  if (!fechaISO) return 'Sin fecha';
+  const fecha = new Date(fechaISO);
+  return fecha.getFullYear() + '-' + (fecha.getMonth() + 1).toString().padStart(2, '0');
+};
+
+const formatearNombreMes = (yyyyMm) => {
+  const [year, month] = yyyyMm.split('-');
+  return MESES[parseInt(month) - 1] + ' ' + year;
+};
+
+function IconoChevron() {
+  return (
+    <svg className="w-3 h-3 inline-block ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M19 9l-7 7-7-7" />
+    </svg>
+  );
+}
+
+// Traduce el texto del color de la BD a un circulo de color.
+// Si el color no se reconoce, muestra el texto limpio.
+function CirculoColor({ color }) {
+  if (!color) return null;
+  const c = sinTildes(color);
+  const encontrado = PALETA.find(([palabras]) => palabras.some((p) => c.includes(p)));
+
+  if (!encontrado) {
+    const textoLimpio = String(color).replace(/[^\w\sñÑáéíóúÁÉÍÓÚ-]/gi, '').trim();
+    if (!textoLimpio) return null;
+    return <span className="ml-1 text-xs text-gray-600 font-medium uppercase">{textoLimpio}</span>;
+  }
+
+  return (
+    <span
+      title={String(color)}
+      className={'inline-block shrink-0 w-3.5 h-3.5 rounded-full ml-1.5 align-middle shadow-sm ' + encontrado[1]}
+    />
+  );
+}
+
+// Campo con etiqueta para los formularios de edicion
+function Campo({ etiqueta, className = '', children }) {
+  return (
+    <label className={'block min-w-0 text-[10px] font-bold text-gray-500 uppercase tracking-wide ' + className}>
+      {etiqueta}
+      {children}
+    </label>
+  );
+}
+
+function ResumenStock({ etiqueta, stats }) {
+  const claseTitulo = 'text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1';
+  const claseValor = 'font-black text-lg md:text-2xl break-words';
+  return (
+    <div className="bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="border-l-4 border-gray-400 pl-3 min-w-0">
+        <p className={claseTitulo}>{etiqueta}</p>
+        <p className={claseValor + ' text-gray-800'}>{stats.totalQty}</p>
+      </div>
+      <div className="border-l-4 border-red-400 pl-3 min-w-0">
+        <p className={claseTitulo}>Costo Invertido</p>
+        <p className={claseValor + ' text-gray-800'}>$ {fmt(stats.totalCosto)}</p>
+      </div>
+      <div className="border-l-4 border-blue-500 pl-3 min-w-0">
+        <p className={claseTitulo}>Valor de Venta</p>
+        <p className={claseValor + ' text-blue-600'}>$ {fmt(stats.totalVenta)}</p>
+      </div>
+      <div className="border-l-4 border-green-500 pl-3 min-w-0">
+        <p className={claseTitulo}>Ganancia Esperada</p>
+        <p className="font-black text-lg md:text-xl text-green-600 leading-tight break-words">
+          $ {fmt(stats.gananciaUsd)}
+          <span className="text-[10px] text-gray-500 block font-semibold mt-0.5">ARS $ {fmt(stats.gananciaArs)}</span>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function EncabezadoStock({ titulo }) {
+  return (
+    <div className={'hidden px-4 py-3 bg-gray-50 border-b border-gray-200 text-sm font-semibold text-gray-500 ' + COLUMNAS_STOCK}>
+      <span>{titulo}</span>
+      <span>Costo / Venta</span>
+      <span className="text-right">Acciones</span>
+    </div>
+  );
+}
+
+// Fila de stock: tarjeta apilada en celulares, fila de tres columnas en escritorio
+function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
+  return (
+    <div className={'p-3 md:px-4 flex flex-col gap-2 hover:bg-gray-50 transition ' + COLUMNAS_STOCK}>
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-semibold text-gray-800 text-sm">
+          <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-xs font-bold shadow-sm">x{item.cantidad}</span>
+          <span className="min-w-0 break-words">{titulo}</span>
+          <CirculoColor color={item.color} />
+        </div>
+        {subtitulo && <div className="text-xs font-medium text-gray-500 mt-1 break-words">{subtitulo}</div>}
+      </div>
+      <div className="text-sm">
+        <span className="text-red-500 font-medium">$ {fmt(item.costo_usd)}</span> /{' '}
+        <span className="text-green-600 font-bold">$ {fmt(item.precio_usd)}</span>
+        <span className="block text-[10px] text-gray-400 font-semibold">ARS $ {fmt(item.precio_usd * cot)}</span>
+      </div>
+      <div className="md:text-right">
+        <button
+          onClick={onOpciones}
+          className="w-full md:w-auto bg-gray-200 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg font-bold hover:bg-gray-300 transition text-xs shadow-sm"
+        >
+          Opciones
+          <IconoChevron />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Pie del formulario de edicion: a cuantas unidades aplicar y botones de accion
+function AccionesEdicion({ cantidad, valor, onChange, onGuardar, onCancelar }) {
+  return (
+    <div className="flex flex-col sm:flex-row sm:items-center gap-2 mt-3">
+      <div className="flex items-center gap-2 bg-blue-50 p-2 rounded-lg border border-blue-100">
+        <span className="text-xs text-blue-700 font-bold whitespace-nowrap">Aplicar a:</span>
+        <select
+          name="cantidadAEditar"
+          value={valor}
+          onChange={onChange}
+          className="flex-1 min-w-0 border border-gray-300 p-1.5 text-sm rounded bg-white text-gray-800"
+        >
+          {Array.from({ length: cantidad }, (_, i) => i + 1).map((n) => (
+            <option key={n} value={n}>{n} unidad(es)</option>
+          ))}
+        </select>
+      </div>
+      <div className="flex gap-2 sm:ml-auto">
+        <button onClick={onGuardar} className="flex-1 sm:flex-none bg-blue-600 text-white px-4 py-2.5 sm:py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-blue-700 transition">
+          Guardar
+        </button>
+        <button onClick={onCancelar} className="flex-1 sm:flex-none bg-gray-200 text-gray-700 px-4 py-2.5 sm:py-2 rounded-lg text-sm font-bold hover:bg-gray-300 transition">
+          Cancelar
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function Admin() {
@@ -150,7 +367,6 @@ function Admin() {
   const [mesSeleccionado, setMesSeleccionado] = useState('todos');
   const [paginaActual, setPaginaActual] = useState(1);
   const [menu, setMenu] = useState(null); // { key, item, tabla, top, right }
-  const ventasPorPagina = 10;
 
   const cot = Number(cotizacion) || 0;
 
@@ -158,10 +374,6 @@ function Admin() {
     document.title = 'Montech | Admin';
     cargarDatos(true);
   }, []);
-
-  useEffect(() => {
-    setPaginaActual(1);
-  }, [mesSeleccionado]);
 
   // Cierra el menu de opciones al hacer scroll o redimensionar
   useEffect(() => {
@@ -178,32 +390,32 @@ function Admin() {
   async function cargarDatos(mostrarLoader = false) {
     if (mostrarLoader) setCargando(true);
 
-    const { data: config } = await supabase.from('configuracion').select('*').eq('id', 1).single();
-    if (config) {
-      setCotizacion(config.cotizacion_dolar);
-      if (config.descuento_mayorista !== null && config.descuento_mayorista !== undefined) {
-        setDescuentoMayorista(config.descuento_mayorista);
+    // El stock se pide ordenado por modelo ascendente y luego se termina de ordenar
+    // con el mismo criterio del catalogo publico (modelo, capacidad, color, precio)
+    const [config, celDisponibles, accDisponibles, celVendidos, accVendidos] = await Promise.all([
+      supabase.from('configuracion').select('*').eq('id', 1).single(),
+      supabase.from('celulares').select('*').eq('estado', 'disponible').order('modelo', { ascending: true }),
+      supabase.from('accesorios').select('*').eq('estado', 'disponible').order('tipo', { ascending: true }).order('modelo', { ascending: true }),
+      supabase.from('celulares').select('*').eq('estado', 'vendido'),
+      supabase.from('accesorios').select('*').eq('estado', 'vendido'),
+    ]);
+
+    const fallo = [config, celDisponibles, accDisponibles, celVendidos, accVendidos].find((r) => r.error);
+    if (fallo) toast.error('Error al cargar datos: ' + fallo.error.message);
+
+    if (config.data) {
+      setCotizacion(config.data.cotizacion_dolar);
+      if (config.data.descuento_mayorista !== null && config.data.descuento_mayorista !== undefined) {
+        setDescuentoMayorista(config.data.descuento_mayorista);
       }
     }
+    if (celDisponibles.data) setStockCelulares(agruparStock(celDisponibles.data, claveCelular, compararCelulares));
+    if (accDisponibles.data) setStockAccesorios(agruparStock(accDisponibles.data, claveAccesorio, compararAccesorios));
 
-    const { data: celDisponibles } = await supabase
-      .from('celulares').select('*').eq('estado', 'disponible').order('fecha_ingreso', { ascending: false });
-    if (celDisponibles) {
-      setStockCelulares(agruparStock(celDisponibles, claveCelular));
-    }
-
-    const { data: accDisponibles } = await supabase
-      .from('accesorios').select('*').eq('estado', 'disponible').order('fecha_ingreso', { ascending: false });
-    if (accDisponibles) {
-      setStockAccesorios(agruparStock(accDisponibles, claveAccesorio));
-    }
-
-    const { data: celVendidos } = await supabase.from('celulares').select('*').eq('estado', 'vendido');
-    const { data: accVendidos } = await supabase.from('accesorios').select('*').eq('estado', 'vendido');
-
-    let ventasUnificadas = [];
-    if (celVendidos) ventasUnificadas = [...ventasUnificadas, ...celVendidos.map((v) => ({ ...v, categoria: 'celular' }))];
-    if (accVendidos) ventasUnificadas = [...ventasUnificadas, ...accVendidos.map((v) => ({ ...v, categoria: 'accesorio' }))];
+    const ventasUnificadas = [
+      ...(celVendidos.data || []).map((v) => ({ ...v, categoria: 'celular' })),
+      ...(accVendidos.data || []).map((v) => ({ ...v, categoria: 'accesorio' })),
+    ];
     ventasUnificadas.sort((a, b) => new Date(b.fecha_venta) - new Date(a.fecha_venta));
     setVentasGlobales(ventasUnificadas);
 
@@ -211,29 +423,29 @@ function Admin() {
   }
 
   async function handleActualizarConfiguracion() {
+    const nuevaCotizacion = parseFloat(cotizacion);
+    const nuevoDescuento = parseFloat(descuentoMayorista);
+    if (!(nuevaCotizacion > 0)) {
+      toast.error('La cotizacion debe ser mayor a cero');
+      return;
+    }
+    if (!(nuevoDescuento >= 0 && nuevoDescuento <= 100)) {
+      toast.error('El descuento mayorista debe estar entre 0 y 100');
+      return;
+    }
     const { error } = await supabase
       .from('configuracion')
-      .update({
-        cotizacion_dolar: parseFloat(cotizacion),
-        descuento_mayorista: parseFloat(descuentoMayorista),
-      })
+      .update({ cotizacion_dolar: nuevaCotizacion, descuento_mayorista: nuevoDescuento })
       .eq('id', 1);
     if (!error) toast.success('Configuracion global actualizada');
     else toast.error('Error al guardar: ' + error.message);
   }
 
-  // Formatea capacidad: agrega GB solo si el valor es numerico
-  const formatearCapacidad = (valor) => {
-    const v = String(valor || '').trim().toUpperCase();
-    if (/^\d+$/.test(v)) return v + 'GB';
-    return v;
-  };
-
   // ---------- CSV ----------
   const escaparCsv = (valor) => '"' + String(valor === null || valor === undefined ? '' : valor).replace(/"/g, '""') + '"';
 
   const exportarCSV = () => {
-    let csv = '\ufeffCategoria,Producto,Color,Fecha Venta,Costo USD,Venta USD,Ganancia USD\n';
+    let csv = '﻿Categoria,Producto,Color,Fecha Venta,Costo USD,Venta USD,Ganancia USD\n';
     ventasFiltradas.forEach((v) => {
       const fecha = v.fecha_venta ? new Date(v.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha';
       const ganancia = (v.precio_usd - v.costo_usd).toFixed(2);
@@ -258,29 +470,30 @@ function Admin() {
   const handleChangeAccesorio = (e) => setFormAccesorio({ ...formAccesorio, [e.target.name]: e.target.value });
   const handleChangePermuta = (e) => setFormPermuta({ ...formPermuta, [e.target.name]: e.target.value });
 
+  const mensajeLote = (cantidad, nombre, resultado) =>
+    resultado.unificadas > 0
+      ? cantidad + ' ' + nombre + ' sumado(s) al lote existente. Promedio: costo USD ' + resultado.costo + ' / venta USD ' + resultado.precio
+      : cantidad + ' ' + nombre + ' agregado(s)';
+
   async function handleGuardarCelular(e) {
     e.preventDefault();
     const cantidad = parseInt(formCelular.cantidad) || 1;
     const filaBase = {
       modelo: formCelular.modelo.trim().toUpperCase(),
       capacidad: formatearCapacidad(formCelular.capacidad),
-      color: formCelular.color,
+      color: colorCanonico(formCelular.color),
       bateria: parseInt(formCelular.bateria),
       costo_usd: parseFloat(formCelular.costo_usd),
       precio_usd: parseFloat(formCelular.precio_usd),
       detalles: formCelular.detalles.trim(),
     };
 
-    const { error, promedio, unificadas } = await guardarLoteConPromedio('celulares', filaBase, cantidad, claveCelular);
-    if (!error) {
-      if (unificadas > 0) {
-        toast.success(cantidad + ' equipo(s) sumado(s) al lote existente. Costo promedio: USD ' + promedio);
-      } else {
-        toast.success(cantidad + ' equipo(s) agregado(s)');
-      }
+    const resultado = await guardarLoteConPromedio('celulares', filaBase, cantidad, claveCelular);
+    if (!resultado.error) {
+      toast.success(mensajeLote(cantidad, 'equipo(s)', resultado));
       setFormCelular({ ...formCelular, cantidad: 1, color: '' });
       cargarDatos(false);
-    } else toast.error('Error al guardar: ' + error.message);
+    } else toast.error('Error al guardar: ' + resultado.error.message);
   }
 
   async function handleGuardarAccesorio(e) {
@@ -289,22 +502,18 @@ function Admin() {
     const filaBase = {
       tipo: formAccesorio.tipo.trim(),
       modelo: formAccesorio.modelo.trim(),
-      color: formAccesorio.color.trim(),
+      color: colorCanonico(formAccesorio.color),
       costo_usd: parseFloat(formAccesorio.costo_usd),
       precio_usd: parseFloat(formAccesorio.precio_usd),
       detalles: formAccesorio.detalles.trim(),
     };
 
-    const { error, promedio, unificadas } = await guardarLoteConPromedio('accesorios', filaBase, cantidad, claveAccesorio);
-    if (!error) {
-      if (unificadas > 0) {
-        toast.success(cantidad + ' accesorio(s) sumado(s) al lote existente. Costo promedio: USD ' + promedio);
-      } else {
-        toast.success(cantidad + ' accesorio(s) agregado(s)');
-      }
+    const resultado = await guardarLoteConPromedio('accesorios', filaBase, cantidad, claveAccesorio);
+    if (!resultado.error) {
+      toast.success(mensajeLote(cantidad, 'accesorio(s)', resultado));
       setFormAccesorio({ ...formAccesorio, cantidad: 1, color: '' });
       cargarDatos(false);
-    } else toast.error('Error al guardar: ' + error.message);
+    } else toast.error('Error al guardar: ' + resultado.error.message);
   }
 
   async function handleGuardarPermuta(e) {
@@ -313,16 +522,16 @@ function Admin() {
       toast.error('La cotizacion debe ser mayor a cero');
       return;
     }
-    const costoUsd = parseFloat((parseFloat(formPermuta.precio_ars) / cot).toFixed(2));
+    const costoUsd = redondear(parseFloat(formPermuta.precio_ars) / cot);
     // Si no se indica precio de venta, queda igualado al costo
     const ventaUsd = formPermuta.precio_venta_ars
-      ? parseFloat((parseFloat(formPermuta.precio_venta_ars) / cot).toFixed(2))
+      ? redondear(parseFloat(formPermuta.precio_venta_ars) / cot)
       : costoUsd;
 
     const filaBase = {
       modelo: formPermuta.modelo.trim().toUpperCase(),
       capacidad: formatearCapacidad(formPermuta.capacidad),
-      color: formPermuta.color,
+      color: colorCanonico(formPermuta.color),
       bateria: parseInt(formPermuta.bateria),
       costo_usd: costoUsd,
       precio_usd: ventaUsd,
@@ -346,7 +555,15 @@ function Admin() {
       setMenu(null);
       return;
     }
-    setMenu({ key, item, tabla, top: rect.bottom + 4, right: window.innerWidth - rect.right });
+    // Si no entra debajo del boton, se abre hacia arriba
+    const entraAbajo = rect.bottom + 4 + ALTO_MENU <= window.innerHeight;
+    setMenu({
+      key,
+      item,
+      tabla,
+      top: entraAbajo ? rect.bottom + 4 : Math.max(8, rect.top - 4 - ALTO_MENU),
+      right: Math.max(8, window.innerWidth - rect.right),
+    });
   };
 
   // ---------- Ventas ----------
@@ -360,21 +577,21 @@ function Admin() {
           <div className="flex flex-col gap-2">
             <button
               onClick={() => { toast.dismiss(t.id); ejecutarVenta([item.ids[0]], tabla, false, item.precio_usd); }}
-              className="bg-green-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-green-600 transition"
+              className="bg-green-500 text-white px-3 py-2.5 rounded-lg text-xs font-bold hover:bg-green-600 transition"
             >
               {esAccesorioMultiple ? 'Vender 1 (Precio Contado)' : 'Confirmar venta (Precio Contado)'}
             </button>
             {esAccesorioMultiple && (
               <button
                 onClick={() => { toast.dismiss(t.id); ejecutarVenta(item.ids, tabla, true, item.precio_usd); }}
-                className="bg-blue-600 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-blue-700 transition"
+                className="bg-blue-600 text-white px-3 py-2.5 rounded-lg text-xs font-bold hover:bg-blue-700 transition"
               >
                 Vender TODOS ({item.cantidad}) Mayorista -{descuentoMayorista}%
               </button>
             )}
             <button
               onClick={() => toast.dismiss(t.id)}
-              className="bg-gray-200 text-gray-800 px-3 py-2 rounded-lg text-xs font-bold hover:bg-gray-300 transition"
+              className="bg-gray-200 text-gray-800 px-3 py-2.5 rounded-lg text-xs font-bold hover:bg-gray-300 transition"
             >
               Cancelar
             </button>
@@ -385,11 +602,14 @@ function Admin() {
     );
   };
 
-  async function ejecutarVenta(idsArray, tabla, esMayorista, precioOriginal) {
-    const updates = { estado: 'vendido', fecha_venta: new Date().toISOString() };
-    if (esMayorista) {
-      updates.precio_usd = parseFloat((precioOriginal * (1 - Number(descuentoMayorista) / 100)).toFixed(2));
-    }
+  // La venta se registra al precio que muestra el lote (promedio), con descuento si es mayorista
+  async function ejecutarVenta(idsArray, tabla, esMayorista, precioLote) {
+    const factor = esMayorista ? 1 - Number(descuentoMayorista) / 100 : 1;
+    const updates = {
+      estado: 'vendido',
+      fecha_venta: new Date().toISOString(),
+      precio_usd: redondear(precioLote * factor),
+    };
     const { error } = await supabase.from(tabla).update(updates).in('id', idsArray);
     if (error) {
       toast.error('Error al registrar la venta: ' + error.message);
@@ -405,24 +625,24 @@ function Admin() {
       (t) => (
         <div>
           <p className="font-bold text-gray-800 text-sm mb-3">Cuantas unidades queres borrar?</p>
-          <div className="flex justify-end gap-2">
+          <div className="flex flex-wrap justify-end gap-2">
             <button
               onClick={() => { toast.dismiss(t.id); ejecutarBorrado([item.ids[0]], tabla); }}
-              className="bg-red-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-red-600"
+              className="bg-red-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-600"
             >
               Borrar 1
             </button>
             {item.cantidad > 1 && (
               <button
                 onClick={() => { toast.dismiss(t.id); ejecutarBorrado(item.ids, tabla); }}
-                className="bg-red-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-red-800"
+                className="bg-red-700 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-800"
               >
                 Borrar TODOS
               </button>
             )}
             <button
               onClick={() => toast.dismiss(t.id)}
-              className="bg-gray-200 text-gray-800 px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-gray-300"
+              className="bg-gray-200 text-gray-800 px-3 py-2 rounded-lg text-xs font-bold hover:bg-gray-300"
             >
               Cancelar
             </button>
@@ -446,47 +666,50 @@ function Admin() {
   // ---------- Edicion ----------
   const iniciarEdicionCelular = (celular) => {
     setEditandoCelularId(celular.ids[0]);
-    setFormEdicionCelular({
-      ...celular,
-      color: colorCanonico(celular.color),
-      cantidadAEditar: celular.cantidad,
-    });
+    setFormEdicionCelular({ ...celular, cantidadAEditar: celular.cantidad });
   };
   const handleChangeEdicionCelular = (e) => setFormEdicionCelular({ ...formEdicionCelular, [e.target.name]: e.target.value });
 
-  // Opciones del desplegable de color en edicion: si el color actual no esta en la lista,
-  // se conserva como opcion para no perderlo
-  const opcionesColorEdicion = (valorActual) => {
-    const lista = COLORES.map(([valor, etiqueta]) => ({ valor, etiqueta }));
-    const actual = String(valorActual || '').trim();
-    if (actual && !COLORES.some(([valor]) => valor === actual)) {
-      lista.unshift({ valor: actual, etiqueta: actual + ' (actual)' });
+  // Valida los campos comunes de una edicion. Devuelve null (y avisa) si algo esta mal.
+  const validarEdicion = (form) => {
+    const color = colorCanonico(form.color);
+    const costo_usd = parseFloat(form.costo_usd);
+    const precio_usd = parseFloat(form.precio_usd);
+    if (!color) {
+      toast.error('Indica un color antes de guardar');
+      return null;
     }
-    return lista;
+    if (!(costo_usd >= 0) || !(precio_usd >= 0)) {
+      toast.error('Costo y venta deben ser numeros validos');
+      return null;
+    }
+    const ids = form.ids.slice(0, parseInt(form.cantidadAEditar) || form.ids.length);
+    return { color, costo_usd, precio_usd, ids };
   };
 
   async function guardarEdicionCelular() {
-    const colorFinal = String(formEdicionCelular.color || '').trim();
-    if (!colorFinal) {
-      toast.error('Elegi un color antes de guardar');
+    const datos = validarEdicion(formEdicionCelular);
+    if (!datos) return;
+    const modelo = String(formEdicionCelular.modelo || '').trim().toUpperCase();
+    if (!modelo) {
+      toast.error('El modelo no puede quedar vacio');
       return;
     }
-    const idsToUpdate = formEdicionCelular.ids.slice(0, parseInt(formEdicionCelular.cantidadAEditar));
     const { error } = await supabase
       .from('celulares')
       .update({
-        modelo: String(formEdicionCelular.modelo || '').trim().toUpperCase(),
+        modelo,
         capacidad: formatearCapacidad(formEdicionCelular.capacidad),
-        color: colorFinal,
+        color: datos.color,
         bateria: parseInt(formEdicionCelular.bateria) || 0,
-        costo_usd: parseFloat(formEdicionCelular.costo_usd),
-        precio_usd: parseFloat(formEdicionCelular.precio_usd),
+        costo_usd: datos.costo_usd,
+        precio_usd: datos.precio_usd,
         detalles: String(formEdicionCelular.detalles || '').trim(),
       })
-      .in('id', idsToUpdate);
+      .in('id', datos.ids);
 
     if (!error) {
-      toast.success(idsToUpdate.length + ' equipo(s) actualizado(s)');
+      toast.success(datos.ids.length + ' equipo(s) actualizado(s)');
       setEditandoCelularId(null);
       cargarDatos(false);
     } else toast.error('Error al actualizar: ' + error.message);
@@ -499,87 +722,35 @@ function Admin() {
   const handleChangeEdicionAccesorio = (e) => setFormEdicionAccesorio({ ...formEdicionAccesorio, [e.target.name]: e.target.value });
 
   async function guardarEdicionAccesorio() {
-    const colorFinal = String(formEdicionAccesorio.color || '').trim();
-    if (!colorFinal) {
-      toast.error('Indica un color o diseno antes de guardar');
+    const datos = validarEdicion(formEdicionAccesorio);
+    if (!datos) return;
+    const tipo = String(formEdicionAccesorio.tipo || '').trim();
+    if (!tipo) {
+      toast.error('El tipo no puede quedar vacio');
       return;
     }
-    const idsToUpdate = formEdicionAccesorio.ids.slice(0, parseInt(formEdicionAccesorio.cantidadAEditar));
     const { error } = await supabase
       .from('accesorios')
       .update({
-        tipo: String(formEdicionAccesorio.tipo || '').trim(),
+        tipo,
         modelo: String(formEdicionAccesorio.modelo || '').trim(),
-        color: colorFinal,
-        costo_usd: parseFloat(formEdicionAccesorio.costo_usd),
-        precio_usd: parseFloat(formEdicionAccesorio.precio_usd),
+        color: datos.color,
+        costo_usd: datos.costo_usd,
+        precio_usd: datos.precio_usd,
         detalles: String(formEdicionAccesorio.detalles || '').trim(),
       })
-      .in('id', idsToUpdate);
+      .in('id', datos.ids);
 
     if (!error) {
-      toast.success(idsToUpdate.length + ' accesorio(s) actualizado(s)');
+      toast.success(datos.ids.length + ' accesorio(s) actualizado(s)');
       setEditandoAccesorioId(null);
       cargarDatos(false);
     } else toast.error('Error al actualizar: ' + error.message);
   }
 
-  // ---------- Utilidades de vista ----------
-  const renderizarCirculoColor = (valorColor) => {
-    if (!valorColor) return null;
-    const c = sinTildes(valorColor);
-    let claseColor = '';
-    let conBorde = false;
-    if (c.includes('negro') || c.includes('medianoche') || c.includes('black') || c.includes('midnight')) claseColor = 'bg-gray-900';
-    else if (c.includes('blanco') || c.includes('estelar') || c.includes('white') || c.includes('starlight')) { claseColor = 'bg-white'; conBorde = true; }
-    else if (c.includes('plata') || c.includes('silver') || c.includes('titanio')) claseColor = 'bg-gray-300';
-    else if (c.includes('gris') || c.includes('grafito') || c.includes('gray') || c.includes('grey') || c.includes('space')) claseColor = 'bg-gray-600';
-    else if (c.includes('rosa') || c.includes('pink')) claseColor = 'bg-pink-300';
-    else if (c.includes('oro') || c.includes('dorado') || c.includes('gold') || c.includes('desierto')) claseColor = 'bg-yellow-200';
-    else if (c.includes('azul') || c.includes('celeste') || c.includes('blue')) claseColor = 'bg-blue-500';
-    else if (c.includes('morado') || c.includes('violeta') || c.includes('purpura') || c.includes('lila') || c.includes('purple')) claseColor = 'bg-purple-600';
-    else if (c.includes('verde') || c.includes('green')) claseColor = 'bg-emerald-500';
-    else if (c.includes('amarillo') || c.includes('yellow')) claseColor = 'bg-yellow-400';
-    else if (c.includes('naranja') || c.includes('orange')) claseColor = 'bg-orange-500';
-    else if (c.includes('rojo') || c.includes('red')) claseColor = 'bg-red-600';
-    else {
-      const textoLimpio = String(valorColor).replace(/[^\w\sñÑáéíóúÁÉÍÓÚ-]/gi, '').trim();
-      if (!textoLimpio) return null;
-      return <span className="ml-1 text-xs text-gray-600 font-medium uppercase">{textoLimpio}</span>;
-    }
-    return (
-      <span
-        className={'inline-block w-3.5 h-3.5 rounded-full ml-1.5 align-middle shadow-sm ' + claseColor + (conBorde ? ' border border-gray-300' : '')}
-      />
-    );
-  };
-
-  const calcularStats = (arrayStock) => {
-    const totalQty = arrayStock.reduce((acc, item) => acc + item.cantidad, 0);
-    const totalCosto = arrayStock.reduce((acc, item) => acc + item.costo_usd * item.cantidad, 0);
-    const totalVenta = arrayStock.reduce((acc, item) => acc + item.precio_usd * item.cantidad, 0);
-    const gananciaUsd = totalVenta - totalCosto;
-    const gananciaArs = gananciaUsd * cot;
-    return { totalQty, totalCosto, totalVenta, gananciaUsd, gananciaArs };
-  };
-
-  const fmt = (n) => Number(n).toLocaleString('es-AR', { maximumFractionDigits: 2 });
-
-  const statsCelulares = calcularStats(stockCelulares);
-  const statsAccesorios = calcularStats(stockAccesorios);
-
-  const obtenerMesAnio = (fechaISO) => {
-    if (!fechaISO) return 'Sin fecha';
-    const fecha = new Date(fechaISO);
-    return fecha.getFullYear() + '-' + (fecha.getMonth() + 1).toString().padStart(2, '0');
-  };
-
-  const formatearNombreMes = (yyyyMm) => {
-    if (yyyyMm === 'Sin fecha') return 'Sin fecha';
-    const [year, month] = yyyyMm.split('-');
-    const meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
-    return meses[parseInt(month) - 1] + ' ' + year;
-  };
+  // ---------- Datos derivados ----------
+  const statsCelulares = calcularStats(stockCelulares, cot);
+  const statsAccesorios = calcularStats(stockAccesorios, cot);
 
   const mesesDisponibles = [...new Set(ventasGlobales.map((v) => obtenerMesAnio(v.fecha_venta)))]
     .filter((m) => m !== 'Sin fecha')
@@ -595,12 +766,10 @@ function Admin() {
   const gananciaVentasUSD = ventasFiltradas.reduce((acc, item) => acc + (item.precio_usd - item.costo_usd), 0);
   const gananciaVentasARS = gananciaVentasUSD * cot;
 
-  const indiceUltimoItem = paginaActual * ventasPorPagina;
-  const indicePrimerItem = indiceUltimoItem - ventasPorPagina;
-  const ventasPaginadas = ventasFiltradas.slice(indicePrimerItem, indiceUltimoItem);
-  const totalPaginas = Math.ceil(ventasFiltradas.length / ventasPorPagina);
+  const totalPaginas = Math.ceil(ventasFiltradas.length / VENTAS_POR_PAGINA);
+  const pagina = Math.min(paginaActual, Math.max(1, totalPaginas));
+  const ventasPaginadas = ventasFiltradas.slice((pagina - 1) * VENTAS_POR_PAGINA, pagina * VENTAS_POR_PAGINA);
 
-  const mesesCortos = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
   const datosGrafico = mesesDisponibles
     .slice(0, 6)
     .reverse()
@@ -608,385 +777,267 @@ function Admin() {
       const ventasMes = ventasGlobales.filter((v) => obtenerMesAnio(v.fecha_venta) === mes);
       const ganancia = ventasMes.reduce((acc, c) => acc + (c.precio_usd - c.costo_usd), 0);
       const [, month] = mes.split('-');
-      return { name: mesesCortos[parseInt(month) - 1], Ganancia: parseFloat(ganancia.toFixed(2)) };
+      return { name: MESES[parseInt(month) - 1].slice(0, 3), Ganancia: redondear(ganancia) };
     });
 
   if (cargando) {
     return <div className="min-h-screen flex items-center justify-center font-bold text-gray-500 bg-gray-50">Cargando...</div>;
   }
 
-  const claseInput = 'border border-gray-200 p-2.5 rounded-lg bg-gray-50 focus:bg-white outline-none';
-  const claseInputModal = 'border border-gray-300 p-2.5 rounded-lg w-full bg-gray-50 focus:bg-white outline-none';
+  const claseTab = (tab) =>
+    'flex-1 md:flex-none py-3 px-6 text-sm font-bold rounded-t-lg transition ' +
+    (activeTab === tab ? 'bg-white border-t border-l border-r border-gray-200 text-blue-600' : 'text-gray-500 hover:bg-gray-100');
+
+  const claseBotonAgregar = 'flex-1 bg-blue-600 text-white py-3 md:py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition text-sm';
 
   return (
-    <div className="min-h-screen p-4 md:p-8 text-gray-800 bg-gray-50">
-      {/* Lista de colores sugeridos para el campo de color de accesorios */}
+    <div className="min-h-screen p-3 md:p-8 text-gray-800 bg-gray-50 overflow-x-hidden">
+      {/* Lista de colores sugeridos: autocompleta pero permite escribir cualquier color */}
       <datalist id="lista-colores">
-        {COLORES.map(([valor]) => (
-          <option key={valor} value={valor} />
+        {COLORES.map((color) => (
+          <option key={color} value={color} />
         ))}
       </datalist>
 
       {/* HEADER */}
-      <div className="flex flex-col md:flex-row justify-between items-center max-w-6xl mx-auto mb-6 pb-4 border-b border-gray-200">
+      <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4 max-w-6xl mx-auto mb-6 pb-4 border-b border-gray-200">
         <div>
-          <h1 className="text-3xl font-extrabold text-gray-900 tracking-tight">Panel de Control</h1>
-          <div className="flex flex-wrap items-center gap-3 mt-1">
-            <button onClick={() => supabase.auth.signOut()} className="text-sm font-bold text-red-500 hover:underline">
+          <h1 className="text-2xl md:text-3xl font-extrabold text-gray-900 tracking-tight">Panel de Control</h1>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1">
+            <button onClick={() => supabase.auth.signOut()} className="text-sm font-bold text-red-500 hover:underline py-1">
               Cerrar Sesion
             </button>
             <span className="text-gray-300">|</span>
-            <a href="/" target="_blank" rel="noreferrer" className="text-sm font-bold text-blue-600 hover:underline">
+            <a href="/" target="_blank" rel="noreferrer" className="text-sm font-bold text-blue-600 hover:underline py-1">
               Ver Catalogo Publico
             </a>
             <span className="text-gray-300">|</span>
-            <button onClick={() => setShowPermutaModal(true)} className="text-sm font-bold text-purple-600 hover:underline">
+            <button onClick={() => setShowPermutaModal(true)} className="text-sm font-bold text-purple-600 hover:underline py-1">
               Registrar Permuta
             </button>
           </div>
         </div>
-        <div className="mt-4 md:mt-0 flex flex-wrap gap-3 items-center">
-          <div className="flex items-center bg-white p-1.5 rounded-xl shadow-sm border border-gray-200">
-            <span className="font-semibold px-2 text-green-600 text-xs uppercase">Cotizacion $</span>
+        <div className="grid grid-cols-2 md:flex gap-2 md:gap-3 md:items-center">
+          <label className="flex items-center min-w-0 bg-white p-1.5 rounded-xl shadow-sm border border-gray-200">
+            <span className="font-semibold px-2 text-green-600 text-[11px] md:text-xs uppercase">Cotizacion $</span>
             <input
               type="number"
+              min="0"
               value={cotizacion}
               onChange={(e) => setCotizacion(e.target.value)}
-              className="w-20 border-l pl-2 py-1 outline-none font-bold text-sm text-gray-700 bg-transparent"
+              className="flex-1 min-w-0 md:flex-none md:w-20 border-l pl-2 py-1 outline-none font-bold text-base md:text-sm text-gray-700 bg-transparent"
             />
-          </div>
-          <div className="flex items-center bg-white p-1.5 rounded-xl shadow-sm border border-gray-200">
-            <span className="font-semibold px-2 text-blue-600 text-xs uppercase">Desc. Mayorista %</span>
+          </label>
+          <label className="flex items-center min-w-0 bg-white p-1.5 rounded-xl shadow-sm border border-gray-200">
+            <span className="font-semibold px-2 text-blue-600 text-[11px] md:text-xs uppercase">Mayorista %</span>
             <input
               type="number"
+              min="0"
+              max="100"
               value={descuentoMayorista}
               onChange={(e) => setDescuentoMayorista(e.target.value)}
-              className="w-16 border-l pl-2 py-1 outline-none font-bold text-sm text-gray-700 bg-transparent"
+              className="flex-1 min-w-0 md:flex-none md:w-16 border-l pl-2 py-1 outline-none font-bold text-base md:text-sm text-gray-700 bg-transparent"
             />
-          </div>
+          </label>
           <button
             onClick={handleActualizarConfiguracion}
-            className="bg-gray-900 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-800 transition"
+            className="col-span-2 bg-gray-900 text-white px-4 py-2.5 md:py-2 rounded-lg text-sm font-medium hover:bg-gray-800 transition"
           >
             Guardar
           </button>
         </div>
       </div>
 
-      <div className="flex flex-col gap-8 max-w-6xl mx-auto w-full">
+      <div className="flex flex-col gap-6 md:gap-8 max-w-6xl mx-auto w-full">
         {/* TABS */}
-        <div className="flex space-x-2 border-b border-gray-200">
-          <button
-            onClick={() => setActiveTab('celulares')}
-            className={
-              'py-3 px-6 text-sm font-bold rounded-t-lg transition ' +
-              (activeTab === 'celulares' ? 'bg-white border-t border-l border-r border-gray-200 text-blue-600' : 'text-gray-500 hover:bg-gray-100')
-            }
-          >
-            Celulares
-          </button>
-          <button
-            onClick={() => setActiveTab('accesorios')}
-            className={
-              'py-3 px-6 text-sm font-bold rounded-t-lg transition ' +
-              (activeTab === 'accesorios' ? 'bg-white border-t border-l border-r border-gray-200 text-blue-600' : 'text-gray-500 hover:bg-gray-100')
-            }
-          >
-            Accesorios
-          </button>
+        <div className="flex gap-2 border-b border-gray-200">
+          <button onClick={() => setActiveTab('celulares')} className={claseTab('celulares')}>Celulares</button>
+          <button onClick={() => setActiveTab('accesorios')} className={claseTab('accesorios')}>Accesorios</button>
         </div>
 
         {/* ===================== TAB CELULARES ===================== */}
         {activeTab === 'celulares' && (
-          <div className="space-y-6">
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
-              <h2 className="text-lg font-bold mb-5 text-gray-800">Nuevo Ingreso de Celular</h2>
+          <div className="space-y-4 md:space-y-6">
+            <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200">
+              <h2 className="text-lg font-bold mb-4 md:mb-5 text-gray-800">Nuevo Ingreso de Celular</h2>
               <form onSubmit={handleGuardarCelular} autoComplete="off" className="flex flex-col md:flex-row gap-3">
                 <div className="flex-1 grid grid-cols-2 md:grid-cols-4 gap-3">
                   <input required name="modelo" value={formCelular.modelo} onChange={handleChangeCelular} type="text" placeholder="Mod. (Ej: 14 PRO)" className={claseInput} />
                   <input required name="capacidad" value={formCelular.capacidad} onChange={handleChangeCelular} type="text" placeholder="Cap. (Ej: 128)" className={claseInput} />
-                  <select required name="color" value={formCelular.color} onChange={handleChangeCelular} className={claseInput + ' text-gray-700'}>
-                    <option value="" disabled>Color...</option>
-                    {COLORES.map(([valor, etiqueta]) => (
-                      <option key={valor} value={valor}>{etiqueta}</option>
-                    ))}
-                  </select>
+                  <input required name="color" list="lista-colores" value={formCelular.color} onChange={handleChangeCelular} type="text" placeholder="Color" className={claseInput} />
                   <input required name="bateria" value={formCelular.bateria} onChange={handleChangeCelular} type="number" min="0" max="100" placeholder="Bateria %" className={claseInput} />
                   <input required name="costo_usd" value={formCelular.costo_usd} onChange={handleChangeCelular} type="number" min="0" step="0.01" placeholder="Costo (USD)" className={claseInput} />
-                  <div className="flex flex-col">
-                    <input required name="precio_usd" value={formCelular.precio_usd} onChange={handleChangeCelular} type="number" min="0" step="0.01" placeholder="Venta (USD)" className={claseInput + ' w-full'} />
+                  <div className="flex flex-col min-w-0">
+                    <input required name="precio_usd" value={formCelular.precio_usd} onChange={handleChangeCelular} type="number" min="0" step="0.01" placeholder="Venta (USD)" className={claseInput} />
                     <span className="text-[10px] text-green-600 font-bold mt-1 ml-1 h-3">
                       {formCelular.precio_usd ? 'ARS $ ' + fmt(formCelular.precio_usd * cot) : ''}
                     </span>
                   </div>
-                  <input name="detalles" value={formCelular.detalles} onChange={handleChangeCelular} type="text" placeholder="Detalles (Opcional)" className={claseInput + ' md:col-span-2'} />
+                  <input name="detalles" value={formCelular.detalles} onChange={handleChangeCelular} type="text" placeholder="Detalles (Opcional)" className={claseInput + ' col-span-2'} />
                 </div>
-                <div className="flex flex-col gap-2 md:w-32">
-                  <div className="relative">
+                <div className="flex md:flex-col gap-2 md:w-32">
+                  <div className="relative w-28 md:w-full shrink-0">
                     <span className="absolute left-3 top-3 text-gray-500 text-sm font-semibold">Cant:</span>
-                    <input required name="cantidad" value={formCelular.cantidad} onChange={handleChangeCelular} type="number" min="1" className={claseInput + ' pl-12 w-full font-bold'} />
+                    <input required name="cantidad" value={formCelular.cantidad} onChange={handleChangeCelular} type="number" min="1" className={claseInput + ' pl-12 font-bold'} />
                   </div>
-                  <button type="submit" className="bg-blue-600 text-white py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition h-full text-sm">
-                    Agregar
-                  </button>
+                  <button type="submit" className={claseBotonAgregar}>Agregar</button>
                 </div>
               </form>
               <p className="text-[11px] text-gray-400 mt-3">
-                Si el modelo, capacidad, color, bateria, precio de venta y detalles coinciden con un lote existente, las unidades se suman a ese lote y el costo se recalcula como promedio.
+                Si el modelo, capacidad, color, bateria y detalles coinciden con un lote existente, las unidades se suman a ese lote y el costo y el precio de venta se recalculan como promedio ponderado.
               </p>
             </div>
 
-            <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200 grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="border-l-4 border-gray-400 pl-3">
-                <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider mb-1">Total Celulares</p>
-                <p className="font-black text-2xl text-gray-800">{statsCelulares.totalQty}</p>
-              </div>
-              <div className="border-l-4 border-red-400 pl-3">
-                <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider mb-1">Costo Invertido</p>
-                <p className="font-black text-2xl text-gray-800">$ {fmt(statsCelulares.totalCosto)}</p>
-              </div>
-              <div className="border-l-4 border-blue-500 pl-3">
-                <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider mb-1">Valor de Venta</p>
-                <p className="font-black text-2xl text-blue-600">$ {fmt(statsCelulares.totalVenta)}</p>
-              </div>
-              <div className="border-l-4 border-green-500 pl-3">
-                <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider mb-1">Ganancia Esperada</p>
-                <p className="font-black text-xl text-green-600 leading-tight">
-                  $ {fmt(statsCelulares.gananciaUsd)}
-                  <span className="text-[10px] text-gray-500 block font-semibold mt-0.5">ARS $ {fmt(statsCelulares.gananciaArs)}</span>
-                </p>
-              </div>
-            </div>
+            <ResumenStock etiqueta="Total Celulares" stats={statsCelulares} />
 
-            <div className="bg-white rounded-2xl shadow-sm border border-gray-200">
-              <div className="max-h-[400px] overflow-y-auto overflow-x-auto">
-                <table className="w-full text-sm text-left min-w-[560px]">
-                  <thead className="bg-gray-50 sticky top-0 border-b border-gray-200 shadow-sm z-10">
-                    <tr className="text-gray-500">
-                      <th className="p-4 font-semibold w-2/5">Equipo</th>
-                      <th className="p-4 font-semibold w-1/5">Costo / Venta</th>
-                      <th className="p-4 text-right font-semibold w-2/5">Acciones</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {stockCelulares.map((celu) => (
-                      <tr key={celu.ids[0]} className="hover:bg-gray-50 transition">
-                        {editandoCelularId === celu.ids[0] ? (
-                          <Fragment>
-                            <td className="p-2 space-y-1">
-                              <div className="flex gap-1">
-                                <input className="border border-gray-300 p-1 w-24 text-xs rounded" name="modelo" value={formEdicionCelular.modelo} onChange={handleChangeEdicionCelular} placeholder="Modelo" />
-                                <input className="border border-gray-300 p-1 w-16 text-xs rounded" name="capacidad" value={formEdicionCelular.capacidad} onChange={handleChangeEdicionCelular} placeholder="Cap." />
-                              </div>
-                              <div className="flex gap-1">
-                                <input className="border border-gray-300 p-1 w-14 text-xs rounded" name="bateria" type="number" min="0" max="100" value={formEdicionCelular.bateria} onChange={handleChangeEdicionCelular} placeholder="Bat %" />
-                                <select
-                                  className="border border-gray-300 p-1 w-32 text-xs rounded bg-white text-gray-800"
-                                  name="color"
-                                  value={formEdicionCelular.color || ''}
-                                  onChange={handleChangeEdicionCelular}
-                                >
-                                  <option value="" disabled>Elegir color...</option>
-                                  {opcionesColorEdicion(formEdicionCelular.color).map((op) => (
-                                    <option key={op.valor} value={op.valor}>{op.etiqueta}</option>
-                                  ))}
-                                </select>
-                              </div>
-                              <input className="border border-gray-300 p-1 w-full text-xs rounded" name="detalles" value={formEdicionCelular.detalles || ''} onChange={handleChangeEdicionCelular} placeholder="Detalles" />
-                              <div className="flex items-center gap-2 mt-2 bg-blue-50 p-1.5 rounded border border-blue-100">
-                                <span className="text-xs text-blue-700 font-bold">Aplicar a:</span>
-                                <select name="cantidadAEditar" value={formEdicionCelular.cantidadAEditar} onChange={handleChangeEdicionCelular} className="border border-gray-300 p-1 text-xs rounded bg-white text-gray-800">
-                                  {Array.from({ length: celu.cantidad }, (_, i) => i + 1).map((n) => (
-                                    <option key={n} value={n}>{n} unidad(es)</option>
-                                  ))}
-                                </select>
-                              </div>
-                            </td>
-                            <td className="p-2">
-                              <input className="border border-gray-300 p-1 w-16 text-xs rounded mb-1" name="costo_usd" type="number" min="0" step="0.01" value={formEdicionCelular.costo_usd} onChange={handleChangeEdicionCelular} placeholder="Costo" />
-                              <br />
-                              <input className="border border-gray-300 p-1 w-16 text-xs rounded" name="precio_usd" type="number" min="0" step="0.01" value={formEdicionCelular.precio_usd} onChange={handleChangeEdicionCelular} placeholder="Venta" />
-                            </td>
-                            <td className="p-2 text-right space-x-1">
-                              <button onClick={guardarEdicionCelular} className="bg-blue-600 text-white px-2 py-1 rounded text-xs font-bold shadow-sm hover:bg-blue-700">Guardar</button>
-                              <button onClick={() => setEditandoCelularId(null)} className="bg-gray-300 text-gray-700 px-2 py-1 rounded text-xs font-bold hover:bg-gray-400">Cancelar</button>
-                            </td>
-                          </Fragment>
-                        ) : (
-                          <Fragment>
-                            <td className="p-4 font-semibold text-gray-800">
-                              <div className="flex items-center gap-2 mb-1">
-                                <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-xs font-bold shadow-sm">x{celu.cantidad}</span>
-                                <span className="whitespace-nowrap">{celu.modelo} {celu.capacidad}</span>
-                                {renderizarCirculoColor(celu.color)}
-                              </div>
-                              <div className="text-xs font-medium text-gray-500 mt-1">Bat: {celu.bateria}% | {celu.detalles}</div>
-                            </td>
-                            <td className="p-4">
-                              <span className="text-red-500 font-medium">$ {celu.costo_usd}</span> /{' '}
-                              <span className="text-green-600 font-bold">$ {celu.precio_usd}</span>
-                            </td>
-                            <td className="p-4 text-right">
-                              <button
-                                onClick={(e) => abrirMenu(e, celu, 'celulares')}
-                                className="bg-gray-200 text-gray-800 px-3 py-1.5 rounded-lg font-bold hover:bg-gray-300 transition text-xs shadow-sm"
-                              >
-                                Opciones
-                                <IconoChevron />
-                              </button>
-                            </td>
-                          </Fragment>
-                        )}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {stockCelulares.length === 0 && <p className="text-center p-8 text-gray-500">No hay celulares en stock.</p>}
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+              <EncabezadoStock titulo="Equipo" />
+              <div className="divide-y divide-gray-100 md:max-h-[400px] md:overflow-y-auto">
+                {stockCelulares.map((celu) =>
+                  editandoCelularId === celu.ids[0] ? (
+                    <div key={celu.ids[0]} className="p-3 md:p-4 bg-blue-50/40">
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                        <Campo etiqueta="Modelo">
+                          <input className={claseInputEdicion} name="modelo" value={formEdicionCelular.modelo || ''} onChange={handleChangeEdicionCelular} />
+                        </Campo>
+                        <Campo etiqueta="Capacidad">
+                          <input className={claseInputEdicion} name="capacidad" value={formEdicionCelular.capacidad || ''} onChange={handleChangeEdicionCelular} />
+                        </Campo>
+                        <Campo etiqueta="Bateria %">
+                          <input className={claseInputEdicion} name="bateria" type="number" min="0" max="100" value={formEdicionCelular.bateria ?? ''} onChange={handleChangeEdicionCelular} />
+                        </Campo>
+                        <Campo etiqueta="Color">
+                          <input className={claseInputEdicion} name="color" type="text" list="lista-colores" value={formEdicionCelular.color || ''} onChange={handleChangeEdicionCelular} placeholder="Elegir o escribir" />
+                        </Campo>
+                        <Campo etiqueta="Costo USD">
+                          <input className={claseInputEdicion} name="costo_usd" type="number" min="0" step="0.01" value={formEdicionCelular.costo_usd ?? ''} onChange={handleChangeEdicionCelular} />
+                        </Campo>
+                        <Campo etiqueta="Venta USD">
+                          <input className={claseInputEdicion} name="precio_usd" type="number" min="0" step="0.01" value={formEdicionCelular.precio_usd ?? ''} onChange={handleChangeEdicionCelular} />
+                        </Campo>
+                        <Campo etiqueta="Detalles" className="col-span-2">
+                          <input className={claseInputEdicion} name="detalles" value={formEdicionCelular.detalles || ''} onChange={handleChangeEdicionCelular} />
+                        </Campo>
+                      </div>
+                      <AccionesEdicion
+                        cantidad={celu.cantidad}
+                        valor={formEdicionCelular.cantidadAEditar}
+                        onChange={handleChangeEdicionCelular}
+                        onGuardar={guardarEdicionCelular}
+                        onCancelar={() => setEditandoCelularId(null)}
+                      />
+                    </div>
+                  ) : (
+                    <FilaStock
+                      key={celu.ids[0]}
+                      item={celu}
+                      titulo={celu.modelo + ' ' + (celu.capacidad || '')}
+                      subtitulo={'Bat: ' + celu.bateria + '%' + (celu.detalles ? ' | ' + celu.detalles : '')}
+                      cot={cot}
+                      onOpciones={(e) => abrirMenu(e, celu, 'celulares')}
+                    />
+                  )
+                )}
               </div>
+              {stockCelulares.length === 0 && <p className="text-center p-8 text-gray-500">No hay celulares en stock.</p>}
             </div>
           </div>
         )}
 
         {/* ===================== TAB ACCESORIOS ===================== */}
         {activeTab === 'accesorios' && (
-          <div className="space-y-6">
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
-              <h2 className="text-lg font-bold mb-5 text-gray-800">Nuevo Ingreso de Accesorio</h2>
+          <div className="space-y-4 md:space-y-6">
+            <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200">
+              <h2 className="text-lg font-bold mb-4 md:mb-5 text-gray-800">Nuevo Ingreso de Accesorio</h2>
               <form onSubmit={handleGuardarAccesorio} autoComplete="off" className="flex flex-col md:flex-row gap-3">
                 <div className="flex-1 grid grid-cols-2 md:grid-cols-3 gap-3">
-                  <input required name="tipo" value={formAccesorio.tipo} onChange={handleChangeAccesorio} type="text" placeholder="Tipo (Ej: Funda, Vidrio)" className={claseInput} />
+                  <input required name="tipo" value={formAccesorio.tipo} onChange={handleChangeAccesorio} type="text" placeholder="Tipo (Ej: Funda)" className={claseInput} />
                   <input required name="modelo" value={formAccesorio.modelo} onChange={handleChangeAccesorio} type="text" placeholder="Mod. (Ej: iPhone 13)" className={claseInput} />
                   <input required name="color" list="lista-colores" value={formAccesorio.color} onChange={handleChangeAccesorio} type="text" placeholder="Color / Diseno" className={claseInput} />
                   <input required name="costo_usd" value={formAccesorio.costo_usd} onChange={handleChangeAccesorio} type="number" min="0" step="0.01" placeholder="Costo (USD)" className={claseInput} />
-                  <div className="flex flex-col">
-                    <input required name="precio_usd" value={formAccesorio.precio_usd} onChange={handleChangeAccesorio} type="number" min="0" step="0.01" placeholder="Venta (USD)" className={claseInput + ' w-full'} />
+                  <div className="flex flex-col min-w-0">
+                    <input required name="precio_usd" value={formAccesorio.precio_usd} onChange={handleChangeAccesorio} type="number" min="0" step="0.01" placeholder="Venta (USD)" className={claseInput} />
                     <span className="text-[10px] text-green-600 font-bold mt-1 ml-1 h-3">
                       {formAccesorio.precio_usd ? 'ARS $ ' + fmt(formAccesorio.precio_usd * cot) : ''}
                     </span>
                   </div>
                   <input name="detalles" value={formAccesorio.detalles} onChange={handleChangeAccesorio} type="text" placeholder="Detalles extra" className={claseInput} />
                 </div>
-                <div className="flex flex-col gap-2 md:w-32">
-                  <div className="relative">
+                <div className="flex md:flex-col gap-2 md:w-32">
+                  <div className="relative w-28 md:w-full shrink-0">
                     <span className="absolute left-3 top-3 text-gray-500 text-sm font-semibold">Cant:</span>
-                    <input required name="cantidad" value={formAccesorio.cantidad} onChange={handleChangeAccesorio} type="number" min="1" className={claseInput + ' pl-12 w-full font-bold'} />
+                    <input required name="cantidad" value={formAccesorio.cantidad} onChange={handleChangeAccesorio} type="number" min="1" className={claseInput + ' pl-12 font-bold'} />
                   </div>
-                  <button type="submit" className="bg-blue-600 text-white py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition h-full text-sm">
-                    Agregar
-                  </button>
+                  <button type="submit" className={claseBotonAgregar}>Agregar</button>
                 </div>
               </form>
+              <p className="text-[11px] text-gray-400 mt-3">
+                Si el tipo, modelo, color y detalles coinciden con un lote existente, las unidades se suman a ese lote y el costo y el precio de venta se recalculan como promedio ponderado.
+              </p>
             </div>
 
-            <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200 grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="border-l-4 border-gray-400 pl-3">
-                <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider mb-1">Total Accesorios</p>
-                <p className="font-black text-2xl text-gray-800">{statsAccesorios.totalQty}</p>
-              </div>
-              <div className="border-l-4 border-red-400 pl-3">
-                <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider mb-1">Costo Invertido</p>
-                <p className="font-black text-2xl text-gray-800">$ {fmt(statsAccesorios.totalCosto)}</p>
-              </div>
-              <div className="border-l-4 border-blue-500 pl-3">
-                <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider mb-1">Valor de Venta</p>
-                <p className="font-black text-2xl text-blue-600">$ {fmt(statsAccesorios.totalVenta)}</p>
-              </div>
-              <div className="border-l-4 border-green-500 pl-3">
-                <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider mb-1">Ganancia Esperada</p>
-                <p className="font-black text-xl text-green-600 leading-tight">
-                  $ {fmt(statsAccesorios.gananciaUsd)}
-                  <span className="text-[10px] text-gray-500 block font-semibold mt-0.5">ARS $ {fmt(statsAccesorios.gananciaArs)}</span>
-                </p>
-              </div>
-            </div>
+            <ResumenStock etiqueta="Total Accesorios" stats={statsAccesorios} />
 
-            <div className="bg-white rounded-2xl shadow-sm border border-gray-200">
-              <div className="max-h-[400px] overflow-y-auto overflow-x-auto">
-                <table className="w-full text-sm text-left min-w-[560px]">
-                  <thead className="bg-gray-50 sticky top-0 border-b border-gray-200 shadow-sm z-10">
-                    <tr className="text-gray-500">
-                      <th className="p-4 font-semibold w-2/5">Accesorio</th>
-                      <th className="p-4 font-semibold w-1/5">Costo / Venta</th>
-                      <th className="p-4 text-right font-semibold w-2/5">Acciones</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {stockAccesorios.map((acc) => (
-                      <tr key={acc.ids[0]} className="hover:bg-gray-50 transition">
-                        {editandoAccesorioId === acc.ids[0] ? (
-                          <Fragment>
-                            <td className="p-2 space-y-1">
-                              <div className="flex gap-1">
-                                <input className="border border-gray-300 p-1 w-24 text-xs rounded" name="tipo" value={formEdicionAccesorio.tipo} onChange={handleChangeEdicionAccesorio} placeholder="Tipo" />
-                                <input className="border border-gray-300 p-1 w-24 text-xs rounded" name="modelo" value={formEdicionAccesorio.modelo} onChange={handleChangeEdicionAccesorio} placeholder="Modelo" />
-                              </div>
-                              <div className="flex gap-1">
-                                <input className="border border-gray-300 p-1 w-full text-xs rounded" name="color" list="lista-colores" value={formEdicionAccesorio.color || ''} onChange={handleChangeEdicionAccesorio} placeholder="Color" />
-                                <input className="border border-gray-300 p-1 w-full text-xs rounded" name="detalles" value={formEdicionAccesorio.detalles || ''} onChange={handleChangeEdicionAccesorio} placeholder="Detalles" />
-                              </div>
-                              <div className="flex items-center gap-2 mt-2 bg-blue-50 p-1.5 rounded border border-blue-100">
-                                <span className="text-xs text-blue-700 font-bold">Aplicar a:</span>
-                                <select name="cantidadAEditar" value={formEdicionAccesorio.cantidadAEditar} onChange={handleChangeEdicionAccesorio} className="border border-gray-300 p-1 text-xs rounded bg-white text-gray-800">
-                                  {Array.from({ length: acc.cantidad }, (_, i) => i + 1).map((n) => (
-                                    <option key={n} value={n}>{n} unidad(es)</option>
-                                  ))}
-                                </select>
-                              </div>
-                            </td>
-                            <td className="p-2">
-                              <input className="border border-gray-300 p-1 w-16 text-xs rounded mb-1" name="costo_usd" type="number" min="0" step="0.01" value={formEdicionAccesorio.costo_usd} onChange={handleChangeEdicionAccesorio} placeholder="Costo" />
-                              <br />
-                              <input className="border border-gray-300 p-1 w-16 text-xs rounded" name="precio_usd" type="number" min="0" step="0.01" value={formEdicionAccesorio.precio_usd} onChange={handleChangeEdicionAccesorio} placeholder="Venta" />
-                            </td>
-                            <td className="p-2 text-right space-x-1">
-                              <button onClick={guardarEdicionAccesorio} className="bg-blue-600 text-white px-2 py-1 rounded text-xs font-bold shadow-sm hover:bg-blue-700">Guardar</button>
-                              <button onClick={() => setEditandoAccesorioId(null)} className="bg-gray-300 text-gray-700 px-2 py-1 rounded text-xs font-bold hover:bg-gray-400">Cancelar</button>
-                            </td>
-                          </Fragment>
-                        ) : (
-                          <Fragment>
-                            <td className="p-4 font-semibold text-gray-800">
-                              <div className="flex items-center gap-2 mb-1">
-                                <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-xs font-bold shadow-sm">x{acc.cantidad}</span>
-                                <span className="whitespace-nowrap">{acc.tipo} - {acc.modelo}</span>
-                                {renderizarCirculoColor(acc.color)}
-                              </div>
-                              <div className="text-xs font-medium text-gray-500 mt-1">{acc.detalles}</div>
-                            </td>
-                            <td className="p-4">
-                              <span className="text-red-500 font-medium">$ {acc.costo_usd}</span> /{' '}
-                              <span className="text-green-600 font-bold">$ {acc.precio_usd}</span>
-                            </td>
-                            <td className="p-4 text-right">
-                              <button
-                                onClick={(e) => abrirMenu(e, acc, 'accesorios')}
-                                className="bg-gray-200 text-gray-800 px-3 py-1.5 rounded-lg font-bold hover:bg-gray-300 transition text-xs shadow-sm"
-                              >
-                                Opciones
-                                <IconoChevron />
-                              </button>
-                            </td>
-                          </Fragment>
-                        )}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {stockAccesorios.length === 0 && <p className="text-center p-8 text-gray-500">No hay accesorios en stock.</p>}
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+              <EncabezadoStock titulo="Accesorio" />
+              <div className="divide-y divide-gray-100 md:max-h-[400px] md:overflow-y-auto">
+                {stockAccesorios.map((acc) =>
+                  editandoAccesorioId === acc.ids[0] ? (
+                    <div key={acc.ids[0]} className="p-3 md:p-4 bg-blue-50/40">
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                        <Campo etiqueta="Tipo">
+                          <input className={claseInputEdicion} name="tipo" value={formEdicionAccesorio.tipo || ''} onChange={handleChangeEdicionAccesorio} />
+                        </Campo>
+                        <Campo etiqueta="Modelo">
+                          <input className={claseInputEdicion} name="modelo" value={formEdicionAccesorio.modelo || ''} onChange={handleChangeEdicionAccesorio} />
+                        </Campo>
+                        <Campo etiqueta="Color / Diseno">
+                          <input className={claseInputEdicion} name="color" type="text" list="lista-colores" value={formEdicionAccesorio.color || ''} onChange={handleChangeEdicionAccesorio} placeholder="Elegir o escribir" />
+                        </Campo>
+                        <Campo etiqueta="Costo USD">
+                          <input className={claseInputEdicion} name="costo_usd" type="number" min="0" step="0.01" value={formEdicionAccesorio.costo_usd ?? ''} onChange={handleChangeEdicionAccesorio} />
+                        </Campo>
+                        <Campo etiqueta="Venta USD">
+                          <input className={claseInputEdicion} name="precio_usd" type="number" min="0" step="0.01" value={formEdicionAccesorio.precio_usd ?? ''} onChange={handleChangeEdicionAccesorio} />
+                        </Campo>
+                        <Campo etiqueta="Detalles">
+                          <input className={claseInputEdicion} name="detalles" value={formEdicionAccesorio.detalles || ''} onChange={handleChangeEdicionAccesorio} />
+                        </Campo>
+                      </div>
+                      <AccionesEdicion
+                        cantidad={acc.cantidad}
+                        valor={formEdicionAccesorio.cantidadAEditar}
+                        onChange={handleChangeEdicionAccesorio}
+                        onGuardar={guardarEdicionAccesorio}
+                        onCancelar={() => setEditandoAccesorioId(null)}
+                      />
+                    </div>
+                  ) : (
+                    <FilaStock
+                      key={acc.ids[0]}
+                      item={acc}
+                      titulo={acc.tipo + ' - ' + acc.modelo}
+                      subtitulo={acc.detalles}
+                      cot={cot}
+                      onOpciones={(e) => abrirMenu(e, acc, 'accesorios')}
+                    />
+                  )
+                )}
               </div>
+              {stockAccesorios.length === 0 && <p className="text-center p-8 text-gray-500">No hay accesorios en stock.</p>}
             </div>
           </div>
         )}
 
         {/* ===================== HISTORIAL GLOBAL ===================== */}
-        <div className="space-y-4 pt-8 border-t border-gray-200 mt-4">
-          <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-3">
-            <h2 className="text-2xl font-bold text-gray-800">Historial Global de Ventas</h2>
-            <div className="flex flex-wrap gap-2">
+        <div className="space-y-4 pt-6 md:pt-8 border-t border-gray-200 mt-2 md:mt-4">
+          <div className="flex flex-col md:flex-row justify-between md:items-end gap-3">
+            <h2 className="text-xl md:text-2xl font-bold text-gray-800">Historial Global de Ventas</h2>
+            <div className="flex gap-2 w-full md:w-auto">
               {ventasFiltradas.length > 0 && (
                 <button
                   onClick={exportarCSV}
-                  className="bg-green-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-green-700 text-sm shadow-sm transition"
+                  className="flex-1 md:flex-none bg-green-600 text-white font-bold py-2.5 md:py-2 px-4 rounded-lg hover:bg-green-700 text-sm shadow-sm transition"
                 >
                   Descargar CSV
                 </button>
@@ -994,8 +1045,8 @@ function Admin() {
               {mesesDisponibles.length > 0 && (
                 <select
                   value={mesSeleccionado}
-                  onChange={(e) => setMesSeleccionado(e.target.value)}
-                  className="border border-gray-300 rounded-lg px-4 py-2 text-sm font-bold bg-white text-gray-700 outline-none shadow-sm cursor-pointer hover:bg-gray-50 transition"
+                  onChange={(e) => { setMesSeleccionado(e.target.value); setPaginaActual(1); }}
+                  className="flex-1 md:flex-none min-w-0 border border-gray-300 rounded-lg px-3 py-2.5 md:py-2 text-sm font-bold bg-white text-gray-700 outline-none shadow-sm cursor-pointer hover:bg-gray-50 transition"
                 >
                   <option value="todos">Historico Total</option>
                   {mesesDisponibles.map((mes) => (
@@ -1006,25 +1057,25 @@ function Admin() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-            <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-blue-500">
-              <p className="text-gray-500 text-sm font-medium">Items Vendidos</p>
-              <p className="text-3xl font-black mt-1 text-gray-800">{totalVendidos}</p>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3 md:gap-4">
+            <div className="min-w-0 bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-blue-500">
+              <p className="text-gray-500 text-xs md:text-sm font-medium">Items Vendidos</p>
+              <p className="text-xl md:text-3xl font-black mt-1 text-gray-800">{totalVendidos}</p>
             </div>
-            <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-green-500">
-              <p className="text-gray-500 text-sm font-medium">Ganancia Neta (USD)</p>
-              <p className="text-3xl font-black mt-1 text-green-600">$ {gananciaVentasUSD.toFixed(2)}</p>
+            <div className="min-w-0 bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-green-500">
+              <p className="text-gray-500 text-xs md:text-sm font-medium">Ganancia Neta (USD)</p>
+              <p className="text-xl md:text-3xl font-black mt-1 text-green-600 break-words">$ {fmt(gananciaVentasUSD)}</p>
             </div>
-            <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-emerald-400 col-span-2 md:col-span-1">
-              <p className="text-gray-500 text-sm font-medium">Ganancia (ARS)</p>
-              <p className="text-3xl font-black mt-1 text-emerald-600">$ {fmt(gananciaVentasARS)}</p>
+            <div className="min-w-0 bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-emerald-400 col-span-2 md:col-span-1">
+              <p className="text-gray-500 text-xs md:text-sm font-medium">Ganancia (ARS)</p>
+              <p className="text-xl md:text-3xl font-black mt-1 text-emerald-600 break-words">$ {fmt(gananciaVentasARS)}</p>
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {datosGrafico.length > 0 && (
-              <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
-                <h3 className="text-sm font-bold text-gray-500 mb-4 uppercase tracking-wider text-center">
+              <div className="min-w-0 bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200">
+                <h3 className="text-xs md:text-sm font-bold text-gray-500 mb-4 uppercase tracking-wider text-center">
                   Ganancias Unificadas (Ultimos 6 Meses, USD)
                 </h3>
                 <div className="h-56 w-full">
@@ -1039,52 +1090,48 @@ function Admin() {
               </div>
             )}
 
-            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex flex-col h-full">
-              <div className="flex-grow overflow-x-auto">
-                <table className="w-full text-sm text-left">
-                  <thead className="bg-gray-50 border-b border-gray-200">
-                    <tr className="text-gray-500">
-                      <th className="p-4 font-semibold">Producto</th>
-                      <th className="p-4 font-semibold text-center">Fecha</th>
-                      <th className="p-4 text-right font-semibold">Ganancia</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {ventasPaginadas.map((item) => (
-                      <tr key={item.categoria + '-' + item.id} className="hover:bg-gray-50 transition">
-                        <td className="p-4 font-semibold text-gray-800">
-                          <span className="text-[10px] uppercase font-bold text-gray-400 block mb-0.5">{item.categoria}</span>
-                          {item.categoria === 'celular' ? item.modelo + ' ' + item.capacidad : item.tipo + ' - ' + item.modelo}
-                          {renderizarCirculoColor(item.color)}
-                        </td>
-                        <td className="p-4 text-center text-gray-500 text-xs font-medium">
-                          {item.fecha_venta ? new Date(item.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha'}
-                        </td>
-                        <td className="p-4 text-right">
-                          <span className="text-green-600 font-bold bg-green-50 px-2 py-1 rounded whitespace-nowrap">
-                            + $ {(item.precio_usd - item.costo_usd).toFixed(2)}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            <div className="min-w-0 bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex flex-col h-full">
+              <div className="flex-grow divide-y divide-gray-100">
+                {ventasPaginadas.map((item) => {
+                  const ganancia = item.precio_usd - item.costo_usd;
+                  return (
+                    <div key={item.categoria + '-' + item.id} className="p-3 md:p-4 flex items-center justify-between gap-3 hover:bg-gray-50 transition">
+                      <div className="min-w-0">
+                        <span className="text-[10px] uppercase font-bold text-gray-400 block mb-0.5">
+                          {item.categoria} - {item.fecha_venta ? new Date(item.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha'}
+                        </span>
+                        <div className="font-semibold text-gray-800 text-sm break-words">
+                          {item.categoria === 'celular' ? item.modelo + ' ' + (item.capacidad || '') : item.tipo + ' - ' + item.modelo}
+                          <CirculoColor color={item.color} />
+                        </div>
+                      </div>
+                      <span
+                        className={
+                          'shrink-0 font-bold text-sm px-2 py-1 rounded whitespace-nowrap ' +
+                          (ganancia < 0 ? 'text-red-600 bg-red-50' : 'text-green-600 bg-green-50')
+                        }
+                      >
+                        {ganancia < 0 ? '-' : '+'} $ {fmt(Math.abs(ganancia))}
+                      </span>
+                    </div>
+                  );
+                })}
                 {ventasFiltradas.length === 0 && <p className="text-center p-8 text-gray-500">No hay ventas registradas.</p>}
               </div>
               {totalPaginas > 1 && (
-                <div className="bg-gray-50 p-4 border-t border-gray-200 flex justify-between items-center mt-auto">
+                <div className="bg-gray-50 p-3 md:p-4 border-t border-gray-200 flex justify-between items-center gap-2 mt-auto">
                   <button
-                    onClick={() => setPaginaActual((p) => Math.max(1, p - 1))}
-                    disabled={paginaActual === 1}
-                    className="px-3 py-1.5 text-xs font-bold text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+                    onClick={() => setPaginaActual(Math.max(1, pagina - 1))}
+                    disabled={pagina === 1}
+                    className="px-4 py-2 text-xs font-bold text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-100 disabled:opacity-50"
                   >
                     Anterior
                   </button>
-                  <span className="text-xs font-medium text-gray-600">Pag {paginaActual} de {totalPaginas}</span>
+                  <span className="text-xs font-medium text-gray-600">Pag {pagina} de {totalPaginas}</span>
                   <button
-                    onClick={() => setPaginaActual((p) => Math.min(totalPaginas, p + 1))}
-                    disabled={paginaActual === totalPaginas}
-                    className="px-3 py-1.5 text-xs font-bold text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+                    onClick={() => setPaginaActual(Math.min(totalPaginas, pagina + 1))}
+                    disabled={pagina === totalPaginas}
+                    className="px-4 py-2 text-xs font-bold text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-100 disabled:opacity-50"
                   >
                     Siguiente
                   </button>
@@ -1108,12 +1155,12 @@ function Admin() {
         </a>
       </div>
 
-      {/* MENU DESPLEGABLE DE OPCIONES (posicion fija, no se recorta por el scroll de la tabla) */}
+      {/* MENU DESPLEGABLE DE OPCIONES (posicion fija, no se recorta por el scroll de la lista) */}
       {menu && (
         <Fragment>
           <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} />
           <div
-            className="fixed z-50 w-32 bg-white rounded-xl shadow-xl border border-gray-100 overflow-hidden"
+            className="fixed z-50 w-40 bg-white rounded-xl shadow-xl border border-gray-100 overflow-hidden"
             style={{ top: menu.top, right: menu.right }}
           >
             <div className="flex flex-col">
@@ -1124,7 +1171,7 @@ function Admin() {
                   if (tabla === 'celulares') iniciarEdicionCelular(item);
                   else iniciarEdicionAccesorio(item);
                 }}
-                className="px-4 py-2.5 text-xs font-bold text-blue-600 bg-white hover:bg-blue-50 text-left border-b border-gray-50"
+                className="px-4 py-3 text-sm font-bold text-blue-600 bg-white hover:bg-blue-50 text-left border-b border-gray-50"
               >
                 Editar
               </button>
@@ -1134,7 +1181,7 @@ function Admin() {
                   setMenu(null);
                   confirmarVenta(item, tabla);
                 }}
-                className="px-4 py-2.5 text-xs font-bold text-green-700 bg-white hover:bg-green-50 text-left border-b border-gray-50"
+                className="px-4 py-3 text-sm font-bold text-green-700 bg-white hover:bg-green-50 text-left border-b border-gray-50"
               >
                 Vendido
               </button>
@@ -1144,7 +1191,7 @@ function Admin() {
                   setMenu(null);
                   confirmarBorrado(item, tabla);
                 }}
-                className="px-4 py-2.5 text-xs font-bold text-red-500 bg-white hover:bg-red-50 text-left"
+                className="px-4 py-3 text-sm font-bold text-red-500 bg-white hover:bg-red-50 text-left"
               >
                 Borrar
               </button>
@@ -1155,30 +1202,25 @@ function Admin() {
 
       {/* MODAL DE PERMUTAS */}
       {showPermutaModal && (
-        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 border border-gray-100 max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto">
             <h2 className="text-xl font-bold mb-4 text-gray-800">Registrar Equipo en Permuta</h2>
             <form onSubmit={handleGuardarPermuta} autoComplete="off" className="grid grid-cols-2 gap-3">
               <div className="col-span-2">
                 <label className="text-xs font-bold text-gray-600 mb-1 block">Modelo del equipo usado</label>
                 <input required name="modelo" value={formPermuta.modelo} onChange={handleChangePermuta} type="text" placeholder="Ej: 11 PRO" className={claseInputModal} />
               </div>
-              <div>
+              <div className="min-w-0">
                 <label className="text-xs font-bold text-gray-600 mb-1 block">Capacidad</label>
                 <input required name="capacidad" value={formPermuta.capacidad} onChange={handleChangePermuta} type="text" placeholder="Ej: 64" className={claseInputModal} />
               </div>
-              <div>
+              <div className="min-w-0">
                 <label className="text-xs font-bold text-gray-600 mb-1 block">Bateria %</label>
                 <input required name="bateria" value={formPermuta.bateria} onChange={handleChangePermuta} type="number" min="0" max="100" placeholder="Ej: 82" className={claseInputModal} />
               </div>
               <div className="col-span-2">
                 <label className="text-xs font-bold text-gray-600 mb-1 block">Color</label>
-                <select required name="color" value={formPermuta.color} onChange={handleChangePermuta} className={claseInputModal + ' text-gray-700'}>
-                  <option value="" disabled>Color...</option>
-                  {COLORES.map(([valor, etiqueta]) => (
-                    <option key={valor} value={valor}>{etiqueta}</option>
-                  ))}
-                </select>
+                <input required name="color" list="lista-colores" value={formPermuta.color} onChange={handleChangePermuta} type="text" placeholder="Elegir o escribir" className={claseInputModal} />
               </div>
               <div className="col-span-2">
                 <label className="text-xs font-bold text-gray-600 mb-1 block">Detalles (estado, rayas, caja, etc.)</label>
@@ -1193,7 +1235,7 @@ function Admin() {
               </div>
               <div className="col-span-2 bg-green-50 p-3 rounded-lg border border-green-100">
                 <label className="text-xs font-bold text-green-800 mb-1 block">Precio de venta (Pesos ARS) - opcional</label>
-                <input name="precio_venta_ars" value={formPermuta.precio_venta_ars} onChange={handleChangePermuta} type="number" min="0" placeholder="Si lo dejas vacio, se iguala al costo" className="border border-green-200 p-2.5 rounded-lg w-full bg-white outline-none font-bold text-gray-800" />
+                <input name="precio_venta_ars" value={formPermuta.precio_venta_ars} onChange={handleChangePermuta} type="number" min="0" placeholder="Vacio = igual al costo" className="border border-green-200 p-2.5 rounded-lg w-full bg-white outline-none font-bold text-gray-800" />
                 <p className="text-xs text-green-700 mt-2 font-bold text-right">
                   Venta: USD{' '}
                   {formPermuta.precio_venta_ars && cot
@@ -1203,11 +1245,11 @@ function Admin() {
                     : '0.00'}
                 </p>
               </div>
-              <div className="col-span-2 flex justify-end gap-3 mt-1">
-                <button type="button" onClick={() => setShowPermutaModal(false)} className="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg font-bold hover:bg-gray-300 transition">
+              <div className="col-span-2 flex gap-3 mt-1">
+                <button type="button" onClick={() => setShowPermutaModal(false)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
                   Cancelar
                 </button>
-                <button type="submit" className="bg-purple-600 text-white px-4 py-2 rounded-lg font-bold shadow-sm hover:bg-purple-700 transition">
+                <button type="submit" className="flex-1 bg-purple-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-purple-700 transition">
                   Guardar Permuta
                 </button>
               </div>

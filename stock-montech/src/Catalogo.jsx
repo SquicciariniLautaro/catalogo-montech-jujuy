@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { supabase } from './supabase';
 
 // Normaliza texto para comparar: quita caracteres raros, espacios repetidos y pasa a mayusculas
@@ -15,6 +15,47 @@ const sinTildes = (v) =>
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
+
+// Redondea a 2 decimales
+const redondear = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// Agrupa las unidades iguales en una sola fila. El precio NO forma parte de la clave:
+// se muestra el promedio ponderado del lote, igual que en el panel de administracion.
+const agruparCatalogo = (filas, claveFn) => {
+  const grupos = filas.reduce((acc, f) => {
+    const k = claveFn(f);
+    if (!acc[k]) acc[k] = { ...f, cantidad: 0, precioTotal: 0 };
+    acc[k].cantidad += 1;
+    acc[k].precioTotal += Number(f.precio_usd) || 0;
+    return acc;
+  }, {});
+  return Object.values(grupos).map((g) => ({ ...g, precio_usd: redondear(g.precioTotal / g.cantidad) }));
+};
+
+const claveCelular = (c) =>
+  [normalizar(c.modelo), normalizar(c.capacidad), normalizar(c.color), Number(c.bateria) || 0, normalizar(c.detalles)].join('|');
+
+const claveAccesorio = (a) =>
+  [normalizar(a.tipo), normalizar(a.modelo), normalizar(a.color), normalizar(a.detalles)].join('|');
+
+function BotonConsultar({ href }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="inline-flex items-center justify-center gap-0.5 bg-white border border-green-500 text-green-700 rounded px-1 py-0.5 text-[9px] md:text-xs font-bold hover:bg-green-50 transition"
+    >
+      <img
+        src="/logo-whatsapp.png"
+        alt=""
+        className="w-2.5 h-2.5 md:w-3 md:h-3 object-contain"
+        onError={(e) => { e.target.style.display = 'none'; }}
+      />
+      Consultar
+    </a>
+  );
+}
 
 // Convierte "128GB" o "1TB" a un numero comparable
 const capacidadANumero = (cap) => {
@@ -113,20 +154,7 @@ function Catalogo() {
           .select('*');
 
         if (celularesData) {
-          const grupos = {};
-          celularesData.forEach((celu) => {
-            const key = [
-              normalizar(celu.modelo),
-              normalizar(celu.capacidad),
-              normalizar(celu.color),
-              Number(celu.bateria) || 0,
-              Number(celu.precio_usd) || 0,
-              normalizar(celu.detalles),
-            ].join('|');
-            if (!grupos[key]) grupos[key] = { ...celu, cantidad: 1 };
-            else grupos[key].cantidad += 1;
-          });
-          setCelularesAgrupados(Object.values(grupos).sort(compararCelulares));
+          setCelularesAgrupados(agruparCatalogo(celularesData, claveCelular).sort(compararCelulares));
         }
 
         const { data: accesoriosData } = await supabase
@@ -134,19 +162,7 @@ function Catalogo() {
           .select('*');
 
         if (accesoriosData) {
-          const grupos = {};
-          accesoriosData.forEach((item) => {
-            const key = [
-              normalizar(item.tipo),
-              normalizar(item.modelo),
-              normalizar(item.color),
-              Number(item.precio_usd) || 0,
-              normalizar(item.detalles),
-            ].join('|');
-            if (!grupos[key]) grupos[key] = { ...item, cantidad: 1 };
-            else grupos[key].cantidad += 1;
-          });
-          setAccesoriosAgrupados(Object.values(grupos).sort(compararAccesorios));
+          setAccesoriosAgrupados(agruparCatalogo(accesoriosData, claveAccesorio).sort(compararAccesorios));
         }
       } catch (error) {
         console.error(error.message);
@@ -167,7 +183,7 @@ function Catalogo() {
   const renderizarCirculoColor = (valorColor) => {
     if (!valorColor) return null;
     const c = sinTildes(valorColor);
-    let claseColor = '';
+    let claseColor;
     let conBorde = false;
 
     if (c.includes('negro') || c.includes('medianoche') || c.includes('black') || c.includes('midnight')) claseColor = 'bg-gray-900';
@@ -200,19 +216,31 @@ function Catalogo() {
 
   const linkWsp = (mensaje) => 'https://wa.me/' + numeroMontech + '?text=' + encodeURIComponent(mensaje);
 
+  // Arma "(Negro, bateria 85%, detalle)" con los datos que tenga el equipo
+  const armarDescripcion = (partes) => {
+    const lista = partes.filter(Boolean);
+    return lista.length > 0 ? ' (' + lista.join(', ') + ')' : '';
+  };
+
   const linkConsultaCelular = (celu, precioPesos) => {
     const precio = Math.round(precioPesos).toLocaleString('es-AR');
+    const descripcion = armarDescripcion([
+      limpiarTexto(celu.color),
+      celu.bateria ? 'batería ' + celu.bateria + '%' : '',
+      String(celu.detalles || '').trim(),
+    ]);
     const mensaje =
       'Hola Montech! Vi en tu catálogo el ' + celu.modelo + ' ' + (celu.capacidad || '') +
-      ' (' + limpiarTexto(celu.color) + ') a $' + precio + '. ¿Tenés stock?';
+      descripcion + ' a $' + precio + '. ¿Tenés stock?';
     return linkWsp(mensaje);
   };
 
   const linkConsultaAccesorio = (acc, precioPesos) => {
     const precio = Math.round(precioPesos).toLocaleString('es-AR');
+    const descripcion = armarDescripcion([limpiarTexto(acc.color), String(acc.detalles || '').trim()]);
     const mensaje =
       'Hola Montech! Vi en tu catálogo el accesorio ' + acc.tipo + ' ' + acc.modelo +
-      ' (' + limpiarTexto(acc.color) + ') a $' + precio + '. ¿Tenés stock?';
+      descripcion + ' a $' + precio + '. ¿Tenés stock?';
     return linkWsp(mensaje);
   };
 
@@ -248,23 +276,6 @@ function Catalogo() {
     (a) => a.tipo,
     (a) => String(a.tipo || '').toUpperCase(),
     (a) => a.modelo
-  );
-
-  const BotonConsultar = ({ href }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      className="inline-flex items-center justify-center gap-0.5 bg-white border border-green-500 text-green-700 rounded px-1 py-0.5 text-[9px] md:text-xs font-bold hover:bg-green-50 transition"
-    >
-      <img
-        src="/logo-whatsapp.png"
-        alt=""
-        className="w-2.5 h-2.5 md:w-3 md:h-3 object-contain"
-        onError={(e) => { e.target.style.display = 'none'; }}
-      />
-      Consultar
-    </a>
   );
 
   const claseSeparador =
@@ -382,11 +393,11 @@ function Catalogo() {
                         {renderizarCirculoColor(celu.color)}
                       </div>
                       {celu.detalles && (
-                        <div className="text-[10px] text-gray-500 leading-tight mt-0.5">{celu.detalles}</div>
+                        <div className="text-[8px] md:text-[11px] text-gray-500 leading-tight mt-0.5">{celu.detalles}</div>
                       )}
                     </td>
                     <td className="py-1 px-0.5 text-center font-medium text-gray-600 text-[9px] md:text-xs">
-                      {celu.bateria}%
+                      {celu.bateria ? celu.bateria + '%' : '-'}
                     </td>
                     <td className="py-1 px-1 text-right font-bold text-gray-900 text-[10px] md:text-sm leading-tight whitespace-nowrap">
                       $ {Math.round(precioPesos).toLocaleString('es-AR')}
@@ -455,7 +466,7 @@ function Catalogo() {
                         {renderizarCirculoColor(acc.color)}
                       </div>
                       {acc.detalles && (
-                        <div className="text-[10px] text-gray-500 leading-tight mt-0.5">{acc.detalles}</div>
+                        <div className="text-[8px] md:text-[11px] text-gray-500 leading-tight mt-0.5">{acc.detalles}</div>
                       )}
                     </td>
                     <td className="py-1 px-1 text-right font-bold text-gray-900 text-[10px] md:text-sm leading-tight whitespace-nowrap">
