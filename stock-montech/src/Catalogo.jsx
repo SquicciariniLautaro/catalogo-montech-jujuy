@@ -9,6 +9,78 @@ const normalizar = (v) =>
     .trim()
     .toUpperCase();
 
+// Minusculas y sin tildes, para el traductor de colores
+const sinTildes = (v) =>
+  String(v === null || v === undefined ? '' : v)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+// Convierte "128GB" o "1TB" a un numero comparable
+const capacidadANumero = (cap) => {
+  const m = String(cap || '').toUpperCase().match(/(\d+(?:[.,]\d+)?)\s*(TB|GB)?/);
+  if (!m) return 0;
+  const n = parseFloat(m[1].replace(',', '.'));
+  return m[2] === 'TB' ? n * 1000 : n;
+};
+
+const comparar = (a, b) => String(a || '').localeCompare(String(b || ''), 'es', { numeric: true, sensitivity: 'base' });
+
+// Orden: modelo, capacidad, color, precio
+const compararCelulares = (a, b) => {
+  const porModelo = comparar(a.modelo, b.modelo);
+  if (porModelo !== 0) return porModelo;
+  const porCapacidad = capacidadANumero(a.capacidad) - capacidadANumero(b.capacidad);
+  if (porCapacidad !== 0) return porCapacidad;
+  const porColor = comparar(a.color, b.color);
+  if (porColor !== 0) return porColor;
+  return (Number(a.precio_usd) || 0) - (Number(b.precio_usd) || 0);
+};
+
+// Orden: tipo, modelo, color, precio
+const compararAccesorios = (a, b) => {
+  const porTipo = comparar(a.tipo, b.tipo);
+  if (porTipo !== 0) return porTipo;
+  const porModelo = comparar(a.modelo, b.modelo);
+  if (porModelo !== 0) return porModelo;
+  const porColor = comparar(a.color, b.color);
+  if (porColor !== 0) return porColor;
+  return (Number(a.precio_usd) || 0) - (Number(b.precio_usd) || 0);
+};
+
+// Arma la lista de filas insertando un renglon separador cada vez que cambia la familia
+// (por ejemplo de "13" a "13 PRO"). Cuando cambia la capacidad dentro de la misma familia
+// se marca la fila con una division mas fina.
+const armarFilasConSeparador = (lista, obtenerFamilia, obtenerEtiqueta, obtenerSub) => {
+  const filas = [];
+  let familiaPrevia = null;
+  let subPrevia = null;
+  let contador = 0;
+
+  lista.forEach((item) => {
+    const familia = normalizar(obtenerFamilia(item));
+    const sub = obtenerSub ? normalizar(obtenerSub(item)) : '';
+    const cambioFamilia = familia !== familiaPrevia;
+
+    if (cambioFamilia) {
+      filas.push({ tipo: 'separador', key: 'sep-' + filas.length, etiqueta: obtenerEtiqueta(item) });
+    }
+    filas.push({
+      tipo: 'fila',
+      key: 'fila-' + filas.length,
+      item,
+      cambioSub: !cambioFamilia && sub !== subPrevia,
+      zebra: contador % 2 === 0,
+    });
+
+    contador += 1;
+    familiaPrevia = familia;
+    subPrevia = sub;
+  });
+
+  return filas;
+};
+
 function Catalogo() {
   const [celularesAgrupados, setCelularesAgrupados] = useState([]);
   const [accesoriosAgrupados, setAccesoriosAgrupados] = useState([]);
@@ -54,10 +126,7 @@ function Catalogo() {
             if (!grupos[key]) grupos[key] = { ...celu, cantidad: 1 };
             else grupos[key].cantidad += 1;
           });
-          const lista = Object.values(grupos).sort((a, b) =>
-            String(a.modelo || '').localeCompare(String(b.modelo || ''), 'es', { numeric: true, sensitivity: 'base' })
-          );
-          setCelularesAgrupados(lista);
+          setCelularesAgrupados(Object.values(grupos).sort(compararCelulares));
         }
 
         const { data: accesoriosData } = await supabase
@@ -77,14 +146,7 @@ function Catalogo() {
             if (!grupos[key]) grupos[key] = { ...item, cantidad: 1 };
             else grupos[key].cantidad += 1;
           });
-          const lista = Object.values(grupos).sort((a, b) =>
-            (String(a.tipo || '') + ' ' + String(a.modelo || '')).localeCompare(
-              String(b.tipo || '') + ' ' + String(b.modelo || ''),
-              'es',
-              { numeric: true, sensitivity: 'base' }
-            )
-          );
-          setAccesoriosAgrupados(lista);
+          setAccesoriosAgrupados(Object.values(grupos).sort(compararAccesorios));
         }
       } catch (error) {
         console.error(error.message);
@@ -104,25 +166,25 @@ function Catalogo() {
   // Traduce el texto del color de la BD a un circulo CSS de Tailwind
   const renderizarCirculoColor = (valorColor) => {
     if (!valorColor) return null;
-    const c = valorColor.toLowerCase();
+    const c = sinTildes(valorColor);
     let claseColor = '';
     let conBorde = false;
 
-    if (c.includes('negro') || c.includes('medianoche')) claseColor = 'bg-gray-900';
-    else if (c.includes('blanco') || c.includes('estelar')) { claseColor = 'bg-white'; conBorde = true; }
+    if (c.includes('negro') || c.includes('medianoche') || c.includes('black') || c.includes('midnight')) claseColor = 'bg-gray-900';
+    else if (c.includes('blanco') || c.includes('estelar') || c.includes('white') || c.includes('starlight')) { claseColor = 'bg-white'; conBorde = true; }
     else if (c.includes('plata') || c.includes('silver') || c.includes('titanio')) claseColor = 'bg-gray-300';
-    else if (c.includes('gris') || c.includes('grafito')) claseColor = 'bg-gray-600';
-    else if (c.includes('rosa')) claseColor = 'bg-pink-300';
-    else if (c.includes('oro') || c.includes('desierto')) claseColor = 'bg-yellow-200';
-    else if (c.includes('azul')) claseColor = 'bg-blue-500';
-    else if (c.includes('morado') || c.includes('violeta') || c.includes('purpura')) claseColor = 'bg-purple-600';
-    else if (c.includes('verde')) claseColor = 'bg-emerald-500';
-    else if (c.includes('amarillo')) claseColor = 'bg-yellow-400';
-    else if (c.includes('naranja')) claseColor = 'bg-orange-500';
+    else if (c.includes('gris') || c.includes('grafito') || c.includes('gray') || c.includes('grey') || c.includes('space')) claseColor = 'bg-gray-600';
+    else if (c.includes('rosa') || c.includes('pink')) claseColor = 'bg-pink-300';
+    else if (c.includes('oro') || c.includes('dorado') || c.includes('gold') || c.includes('desierto')) claseColor = 'bg-yellow-200';
+    else if (c.includes('azul') || c.includes('celeste') || c.includes('blue')) claseColor = 'bg-blue-500';
+    else if (c.includes('morado') || c.includes('violeta') || c.includes('purpura') || c.includes('lila') || c.includes('purple')) claseColor = 'bg-purple-600';
+    else if (c.includes('verde') || c.includes('green')) claseColor = 'bg-emerald-500';
+    else if (c.includes('amarillo') || c.includes('yellow')) claseColor = 'bg-yellow-400';
+    else if (c.includes('naranja') || c.includes('orange')) claseColor = 'bg-orange-500';
     else if (c.includes('rojo') || c.includes('red')) claseColor = 'bg-red-600';
     else {
       // Color desconocido: se filtran caracteres raros y se muestra solo el texto
-      const textoLimpio = valorColor.replace(/[^\w\sñÑáéíóúÁÉÍÓÚ-]/gi, '').trim();
+      const textoLimpio = String(valorColor).replace(/[^\w\sñÑáéíóúÁÉÍÓÚ-]/gi, '').trim();
       if (!textoLimpio) return null;
       return <span className="ml-1 text-[9px] text-gray-600 font-medium uppercase">{textoLimpio}</span>;
     }
@@ -141,7 +203,7 @@ function Catalogo() {
   const linkConsultaCelular = (celu, precioPesos) => {
     const precio = Math.round(precioPesos).toLocaleString('es-AR');
     const mensaje =
-      'Hola Montech! Vi en tu catalogo el ' + celu.modelo + ' ' + (celu.capacidad || '') +
+      'Hola Montech! Vi en tu catálogo el ' + celu.modelo + ' ' + (celu.capacidad || '') +
       ' (' + limpiarTexto(celu.color) + ') a $' + precio + '. ¿Tenés stock?';
     return linkWsp(mensaje);
   };
@@ -149,7 +211,7 @@ function Catalogo() {
   const linkConsultaAccesorio = (acc, precioPesos) => {
     const precio = Math.round(precioPesos).toLocaleString('es-AR');
     const mensaje =
-      'Hola Montech! Vi en tu catalogo el accesorio ' + acc.tipo + ' ' + acc.modelo +
+      'Hola Montech! Vi en tu catálogo el accesorio ' + acc.tipo + ' ' + acc.modelo +
       ' (' + limpiarTexto(acc.color) + ') a $' + precio + '. ¿Tenés stock?';
     return linkWsp(mensaje);
   };
@@ -174,6 +236,20 @@ function Catalogo() {
     );
   });
 
+  const filasCelulares = armarFilasConSeparador(
+    celularesFiltrados,
+    (c) => c.modelo,
+    (c) => String(c.modelo || '').toUpperCase(),
+    (c) => c.capacidad
+  );
+
+  const filasAccesorios = armarFilasConSeparador(
+    accesoriosFiltrados,
+    (a) => a.tipo,
+    (a) => String(a.tipo || '').toUpperCase(),
+    (a) => a.modelo
+  );
+
   const BotonConsultar = ({ href }) => (
     <a
       href={href}
@@ -190,6 +266,9 @@ function Catalogo() {
       Consultar
     </a>
   );
+
+  const claseSeparador =
+    'bg-gray-200 text-gray-600 text-[9px] md:text-[11px] font-bold uppercase tracking-wider px-2 py-1 border-y border-gray-300';
 
   if (cargando) {
     return <div className="p-10 text-center font-bold text-gray-600">Cargando catalogo...</div>;
@@ -265,7 +344,7 @@ function Catalogo() {
               </tr>
             </thead>
             <tbody>
-              {celularesFiltrados.length === 0 && (
+              {filasCelulares.length === 0 && (
                 <tr>
                   <td colSpan="5" className="text-center p-6 text-gray-500 text-sm">
                     No se encontraron equipos con esa busqueda.
@@ -273,12 +352,25 @@ function Catalogo() {
                 </tr>
               )}
 
-              {celularesFiltrados.map((celu, index) => {
+              {filasCelulares.map((fila) => {
+                if (fila.tipo === 'separador') {
+                  return (
+                    <tr key={fila.key}>
+                      <td colSpan="5" className={claseSeparador}>{fila.etiqueta}</td>
+                    </tr>
+                  );
+                }
+
+                const celu = fila.item;
                 const precioPesos = Number(celu.precio_usd) * cotizacion;
                 return (
                   <tr
-                    key={'cel-' + index}
-                    className={'border-b border-gray-200 ' + (index % 2 === 0 ? 'bg-white' : 'bg-gray-50')}
+                    key={fila.key}
+                    className={
+                      'border-b border-gray-200 ' +
+                      (fila.cambioSub ? 'border-t-2 border-t-gray-300 ' : '') +
+                      (fila.zebra ? 'bg-white' : 'bg-gray-50')
+                    }
                   >
                     <td className="py-1 px-0.5 text-center font-bold text-blue-600 bg-blue-50 text-[10px]">
                       {celu.cantidad}
@@ -323,7 +415,7 @@ function Catalogo() {
               </tr>
             </thead>
             <tbody>
-              {accesoriosFiltrados.length === 0 && (
+              {filasAccesorios.length === 0 && (
                 <tr>
                   <td colSpan="4" className="text-center p-6 text-gray-500 text-sm">
                     {accesoriosAgrupados.length === 0
@@ -333,12 +425,25 @@ function Catalogo() {
                 </tr>
               )}
 
-              {accesoriosFiltrados.map((acc, index) => {
+              {filasAccesorios.map((fila) => {
+                if (fila.tipo === 'separador') {
+                  return (
+                    <tr key={fila.key}>
+                      <td colSpan="4" className={claseSeparador}>{fila.etiqueta}</td>
+                    </tr>
+                  );
+                }
+
+                const acc = fila.item;
                 const precioPesos = Number(acc.precio_usd) * cotizacion;
                 return (
                   <tr
-                    key={'acc-' + index}
-                    className={'border-b border-gray-200 ' + (index % 2 === 0 ? 'bg-white' : 'bg-gray-50')}
+                    key={fila.key}
+                    className={
+                      'border-b border-gray-200 ' +
+                      (fila.cambioSub ? 'border-t-2 border-t-gray-300 ' : '') +
+                      (fila.zebra ? 'bg-white' : 'bg-gray-50')
+                    }
                   >
                     <td className="py-1 px-0.5 text-center font-bold text-blue-600 bg-blue-50 text-[10px]">
                       {acc.cantidad}

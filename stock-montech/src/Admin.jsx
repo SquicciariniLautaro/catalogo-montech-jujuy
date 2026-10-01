@@ -36,6 +36,20 @@ const normalizar = (v) =>
     .trim()
     .toUpperCase();
 
+// Minusculas y sin tildes, para el traductor de colores
+const sinTildes = (v) =>
+  String(v === null || v === undefined ? '' : v)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+// Devuelve el nombre canonico del color si coincide con la lista (sin importar mayusculas)
+const colorCanonico = (valor) => {
+  const v = String(valor || '').trim().toLowerCase();
+  const encontrado = COLORES.find(([clave]) => clave.toLowerCase() === v);
+  return encontrado ? encontrado[0] : String(valor || '').trim();
+};
+
 // La clave de lote NO incluye el costo: el costo se promedia
 const claveCelular = (c) =>
   [
@@ -432,18 +446,38 @@ function Admin() {
   // ---------- Edicion ----------
   const iniciarEdicionCelular = (celular) => {
     setEditandoCelularId(celular.ids[0]);
-    setFormEdicionCelular({ ...celular, cantidadAEditar: celular.cantidad });
+    setFormEdicionCelular({
+      ...celular,
+      color: colorCanonico(celular.color),
+      cantidadAEditar: celular.cantidad,
+    });
   };
   const handleChangeEdicionCelular = (e) => setFormEdicionCelular({ ...formEdicionCelular, [e.target.name]: e.target.value });
 
+  // Opciones del desplegable de color en edicion: si el color actual no esta en la lista,
+  // se conserva como opcion para no perderlo
+  const opcionesColorEdicion = (valorActual) => {
+    const lista = COLORES.map(([valor, etiqueta]) => ({ valor, etiqueta }));
+    const actual = String(valorActual || '').trim();
+    if (actual && !COLORES.some(([valor]) => valor === actual)) {
+      lista.unshift({ valor: actual, etiqueta: actual + ' (actual)' });
+    }
+    return lista;
+  };
+
   async function guardarEdicionCelular() {
+    const colorFinal = String(formEdicionCelular.color || '').trim();
+    if (!colorFinal) {
+      toast.error('Elegi un color antes de guardar');
+      return;
+    }
     const idsToUpdate = formEdicionCelular.ids.slice(0, parseInt(formEdicionCelular.cantidadAEditar));
     const { error } = await supabase
       .from('celulares')
       .update({
         modelo: String(formEdicionCelular.modelo || '').trim().toUpperCase(),
         capacidad: formatearCapacidad(formEdicionCelular.capacidad),
-        color: String(formEdicionCelular.color || '').trim(),
+        color: colorFinal,
         bateria: parseInt(formEdicionCelular.bateria) || 0,
         costo_usd: parseFloat(formEdicionCelular.costo_usd),
         precio_usd: parseFloat(formEdicionCelular.precio_usd),
@@ -465,13 +499,18 @@ function Admin() {
   const handleChangeEdicionAccesorio = (e) => setFormEdicionAccesorio({ ...formEdicionAccesorio, [e.target.name]: e.target.value });
 
   async function guardarEdicionAccesorio() {
+    const colorFinal = String(formEdicionAccesorio.color || '').trim();
+    if (!colorFinal) {
+      toast.error('Indica un color o diseno antes de guardar');
+      return;
+    }
     const idsToUpdate = formEdicionAccesorio.ids.slice(0, parseInt(formEdicionAccesorio.cantidadAEditar));
     const { error } = await supabase
       .from('accesorios')
       .update({
         tipo: String(formEdicionAccesorio.tipo || '').trim(),
         modelo: String(formEdicionAccesorio.modelo || '').trim(),
-        color: String(formEdicionAccesorio.color || '').trim(),
+        color: colorFinal,
         costo_usd: parseFloat(formEdicionAccesorio.costo_usd),
         precio_usd: parseFloat(formEdicionAccesorio.precio_usd),
         detalles: String(formEdicionAccesorio.detalles || '').trim(),
@@ -488,23 +527,23 @@ function Admin() {
   // ---------- Utilidades de vista ----------
   const renderizarCirculoColor = (valorColor) => {
     if (!valorColor) return null;
-    const c = valorColor.toLowerCase();
+    const c = sinTildes(valorColor);
     let claseColor = '';
     let conBorde = false;
-    if (c.includes('negro') || c.includes('medianoche')) claseColor = 'bg-gray-900';
-    else if (c.includes('blanco') || c.includes('estelar')) { claseColor = 'bg-white'; conBorde = true; }
+    if (c.includes('negro') || c.includes('medianoche') || c.includes('black') || c.includes('midnight')) claseColor = 'bg-gray-900';
+    else if (c.includes('blanco') || c.includes('estelar') || c.includes('white') || c.includes('starlight')) { claseColor = 'bg-white'; conBorde = true; }
     else if (c.includes('plata') || c.includes('silver') || c.includes('titanio')) claseColor = 'bg-gray-300';
-    else if (c.includes('gris') || c.includes('grafito')) claseColor = 'bg-gray-600';
-    else if (c.includes('rosa')) claseColor = 'bg-pink-300';
-    else if (c.includes('oro') || c.includes('desierto')) claseColor = 'bg-yellow-200';
-    else if (c.includes('azul')) claseColor = 'bg-blue-500';
-    else if (c.includes('morado') || c.includes('violeta') || c.includes('purpura')) claseColor = 'bg-purple-600';
-    else if (c.includes('verde')) claseColor = 'bg-emerald-500';
-    else if (c.includes('amarillo')) claseColor = 'bg-yellow-400';
-    else if (c.includes('naranja')) claseColor = 'bg-orange-500';
+    else if (c.includes('gris') || c.includes('grafito') || c.includes('gray') || c.includes('grey') || c.includes('space')) claseColor = 'bg-gray-600';
+    else if (c.includes('rosa') || c.includes('pink')) claseColor = 'bg-pink-300';
+    else if (c.includes('oro') || c.includes('dorado') || c.includes('gold') || c.includes('desierto')) claseColor = 'bg-yellow-200';
+    else if (c.includes('azul') || c.includes('celeste') || c.includes('blue')) claseColor = 'bg-blue-500';
+    else if (c.includes('morado') || c.includes('violeta') || c.includes('purpura') || c.includes('lila') || c.includes('purple')) claseColor = 'bg-purple-600';
+    else if (c.includes('verde') || c.includes('green')) claseColor = 'bg-emerald-500';
+    else if (c.includes('amarillo') || c.includes('yellow')) claseColor = 'bg-yellow-400';
+    else if (c.includes('naranja') || c.includes('orange')) claseColor = 'bg-orange-500';
     else if (c.includes('rojo') || c.includes('red')) claseColor = 'bg-red-600';
     else {
-      const textoLimpio = valorColor.replace(/[^\w\sñÑáéíóúÁÉÍÓÚ-]/gi, '').trim();
+      const textoLimpio = String(valorColor).replace(/[^\w\sñÑáéíóúÁÉÍÓÚ-]/gi, '').trim();
       if (!textoLimpio) return null;
       return <span className="ml-1 text-xs text-gray-600 font-medium uppercase">{textoLimpio}</span>;
     }
@@ -581,7 +620,7 @@ function Admin() {
 
   return (
     <div className="min-h-screen p-4 md:p-8 text-gray-800 bg-gray-50">
-      {/* Lista de colores sugeridos para los campos de edicion */}
+      {/* Lista de colores sugeridos para el campo de color de accesorios */}
       <datalist id="lista-colores">
         {COLORES.map(([valor]) => (
           <option key={valor} value={valor} />
@@ -741,7 +780,17 @@ function Admin() {
                               </div>
                               <div className="flex gap-1">
                                 <input className="border border-gray-300 p-1 w-14 text-xs rounded" name="bateria" type="number" min="0" max="100" value={formEdicionCelular.bateria} onChange={handleChangeEdicionCelular} placeholder="Bat %" />
-                                <input className="border border-gray-300 p-1 w-28 text-xs rounded" name="color" list="lista-colores" value={formEdicionCelular.color} onChange={handleChangeEdicionCelular} placeholder="Color" />
+                                <select
+                                  className="border border-gray-300 p-1 w-32 text-xs rounded bg-white text-gray-800"
+                                  name="color"
+                                  value={formEdicionCelular.color || ''}
+                                  onChange={handleChangeEdicionCelular}
+                                >
+                                  <option value="" disabled>Elegir color...</option>
+                                  {opcionesColorEdicion(formEdicionCelular.color).map((op) => (
+                                    <option key={op.valor} value={op.valor}>{op.etiqueta}</option>
+                                  ))}
+                                </select>
                               </div>
                               <input className="border border-gray-300 p-1 w-full text-xs rounded" name="detalles" value={formEdicionCelular.detalles || ''} onChange={handleChangeEdicionCelular} placeholder="Detalles" />
                               <div className="flex items-center gap-2 mt-2 bg-blue-50 p-1.5 rounded border border-blue-100">
@@ -807,7 +856,7 @@ function Admin() {
                 <div className="flex-1 grid grid-cols-2 md:grid-cols-3 gap-3">
                   <input required name="tipo" value={formAccesorio.tipo} onChange={handleChangeAccesorio} type="text" placeholder="Tipo (Ej: Funda, Vidrio)" className={claseInput} />
                   <input required name="modelo" value={formAccesorio.modelo} onChange={handleChangeAccesorio} type="text" placeholder="Mod. (Ej: iPhone 13)" className={claseInput} />
-                  <input required name="color" value={formAccesorio.color} onChange={handleChangeAccesorio} type="text" placeholder="Color / Diseno" className={claseInput} />
+                  <input required name="color" list="lista-colores" value={formAccesorio.color} onChange={handleChangeAccesorio} type="text" placeholder="Color / Diseno" className={claseInput} />
                   <input required name="costo_usd" value={formAccesorio.costo_usd} onChange={handleChangeAccesorio} type="number" min="0" step="0.01" placeholder="Costo (USD)" className={claseInput} />
                   <div className="flex flex-col">
                     <input required name="precio_usd" value={formAccesorio.precio_usd} onChange={handleChangeAccesorio} type="number" min="0" step="0.01" placeholder="Venta (USD)" className={claseInput + ' w-full'} />
@@ -872,7 +921,7 @@ function Admin() {
                                 <input className="border border-gray-300 p-1 w-24 text-xs rounded" name="modelo" value={formEdicionAccesorio.modelo} onChange={handleChangeEdicionAccesorio} placeholder="Modelo" />
                               </div>
                               <div className="flex gap-1">
-                                <input className="border border-gray-300 p-1 w-full text-xs rounded" name="color" list="lista-colores" value={formEdicionAccesorio.color} onChange={handleChangeEdicionAccesorio} placeholder="Color" />
+                                <input className="border border-gray-300 p-1 w-full text-xs rounded" name="color" list="lista-colores" value={formEdicionAccesorio.color || ''} onChange={handleChangeEdicionAccesorio} placeholder="Color" />
                                 <input className="border border-gray-300 p-1 w-full text-xs rounded" name="detalles" value={formEdicionAccesorio.detalles || ''} onChange={handleChangeEdicionAccesorio} placeholder="Detalles" />
                               </div>
                               <div className="flex items-center gap-2 mt-2 bg-blue-50 p-1.5 rounded border border-blue-100">
