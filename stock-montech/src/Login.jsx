@@ -6,6 +6,7 @@ function Login({ onLoginExitoso }) {
 const [email, setEmail] = useState('')
 const [password, setPassword] = useState('')
 const [cargando, setCargando] = useState(false)
+const [verPassword, setVerPassword] = useState(false)
 
 async function handleLogin(e) {
     e.preventDefault()
@@ -35,16 +36,30 @@ return (
         <div>
             <label className="block text-sm font-semibold text-gray-700 mb-1">Correo Electrónico</label>
             <input 
-            type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
+            type="email" required autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)}
             className="w-full border border-gray-300 p-2.5 rounded-lg bg-gray-50 outline-none focus:border-blue-500" 
             />
         </div>
         <div>
             <label className="block text-sm font-semibold text-gray-700 mb-1">Contraseña</label>
-            <input 
-            type="password" required value={password} onChange={(e) => setPassword(e.target.value)}
-            className="w-full border border-gray-300 p-2.5 rounded-lg bg-gray-50 outline-none focus:border-blue-500" 
+            <div className="relative">
+            <input
+            type={verPassword ? 'text' : 'password'} required autoComplete="current-password"
+            value={password} onChange={(e) => setPassword(e.target.value)}
+            className="w-full border border-gray-300 p-2.5 pr-11 rounded-lg bg-gray-50 outline-none focus:border-blue-500"
             />
+            <button
+            type="button" onClick={() => setVerPassword(!verPassword)}
+            aria-label={verPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+            className="absolute inset-y-0 right-0 px-3 text-gray-400 hover:text-gray-700"
+            >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.5 12S6 5 12 5s9.5 7 9.5 7-3.5 7-9.5 7-9.5-7-9.5-7z" />
+                <circle cx="12" cy="12" r="3" strokeWidth="2" />
+                {verPassword && <path strokeLinecap="round" strokeWidth="2" d="M4 4l16 16" />}
+            </svg>
+            </button>
+            </div>
         </div>
         <button 
             type="submit" disabled={cargando}

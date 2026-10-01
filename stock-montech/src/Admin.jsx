@@ -1,4 +1,4 @@
-import { useState, useEffect, Fragment } from 'react';
+import { useState, useEffect, useRef, Fragment } from 'react';
 import { supabase } from './supabase';
 import toast from 'react-hot-toast';
 import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer } from 'recharts';
@@ -41,7 +41,7 @@ const VENTAS_POR_PAGINA = 10;
 const ALTO_MENU = 140;
 
 // Columnas compartidas por el encabezado y las filas del stock en escritorio
-const COLUMNAS_STOCK = 'md:grid md:grid-cols-[minmax(0,1fr)_12rem_8rem] md:gap-4 md:items-center';
+const COLUMNAS_STOCK = 'md:grid md:grid-cols-[minmax(0,1fr)_17rem_8rem] md:gap-4 md:items-center';
 
 const claseInput = 'border border-gray-200 p-2.5 rounded-lg bg-gray-50 focus:bg-white outline-none w-full min-w-0';
 const claseInputModal = 'border border-gray-300 p-2.5 rounded-lg w-full min-w-0 bg-gray-50 focus:bg-white outline-none';
@@ -145,12 +145,24 @@ const agruparStock = (filas, claveFn, compararFn) => {
     .sort(compararFn);
 };
 
+const TAMANO_PAGINA = 1000;
+
+// Supabase devuelve como maximo 1000 filas por consulta: se pide por paginas hasta traer todo
+async function traerTodo(armarConsulta) {
+  const filas = [];
+  for (let desde = 0; ; desde += TAMANO_PAGINA) {
+    const { data, error } = await armarConsulta().range(desde, desde + TAMANO_PAGINA - 1);
+    if (error) return { data: null, error };
+    filas.push(...data);
+    if (data.length < TAMANO_PAGINA) return { data: filas, error: null };
+  }
+}
+
 // Inserta unidades nuevas y unifica costo y precio del lote con el promedio ponderado
 async function guardarLoteConPromedio(tabla, filaBase, cantidad, claveFn) {
-  const { data: existentes, error: errorBusqueda } = await supabase
-    .from(tabla)
-    .select('*')
-    .eq('estado', 'disponible');
+  const { data: existentes, error: errorBusqueda } = await traerTodo(() =>
+    supabase.from(tabla).select('*').eq('estado', 'disponible').order('id')
+  );
   if (errorBusqueda) return { error: errorBusqueda };
 
   const claveNueva = claveFn(filaBase);
@@ -214,12 +226,13 @@ function IconoChevron() {
 
 // Traduce el texto del color de la BD a un circulo de color.
 // Si el color no se reconoce, muestra el texto limpio.
-function CirculoColor({ color }) {
+function CirculoColor({ color, soloCirculo = false }) {
   if (!color) return null;
   const c = sinTildes(color);
   const encontrado = PALETA.find(([palabras]) => palabras.some((p) => c.includes(p)));
 
   if (!encontrado) {
+    if (soloCirculo) return null;
     const textoLimpio = String(color).replace(/[^\w\sñÑáéíóúÁÉÍÓÚ-]/gi, '').trim();
     if (!textoLimpio) return null;
     return <span className="ml-1 text-xs text-gray-600 font-medium uppercase">{textoLimpio}</span>;
@@ -228,7 +241,7 @@ function CirculoColor({ color }) {
   return (
     <span
       title={String(color)}
-      className={'inline-block shrink-0 w-3.5 h-3.5 rounded-full ml-1.5 align-middle shadow-sm ' + encontrado[1]}
+      className={'inline-block shrink-0 w-3.5 h-3.5 rounded-full align-middle shadow-sm ' + (soloCirculo ? '' : 'ml-1.5 ') + encontrado[1]}
     />
   );
 }
@@ -271,32 +284,72 @@ function ResumenStock({ etiqueta, stats }) {
   );
 }
 
-function EncabezadoStock({ titulo }) {
+// Dato con etiqueta dentro de una fila de stock
+function DatoStock({ etiqueta, valor, clase }) {
   return (
-    <div className={'hidden px-4 py-3 bg-gray-50 border-b border-gray-200 text-sm font-semibold text-gray-500 ' + COLUMNAS_STOCK}>
-      <span>{titulo}</span>
-      <span>Costo / Venta</span>
-      <span className="text-right">Acciones</span>
+    <div className="min-w-0">
+      <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wide">{etiqueta}</span>
+      <span className={'block text-sm font-bold break-words ' + clase}>{valor}</span>
     </div>
+  );
+}
+
+// Titulo de la seccion de stock y, en escritorio, nombres de las columnas
+function EncabezadoStock({ titulo, columna, stats, lotes, busqueda, onBusqueda }) {
+  return (
+    <Fragment>
+      <div className="px-3 md:px-4 py-3 border-b border-gray-200 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <h2 className="text-lg font-bold text-gray-800">{titulo}</h2>
+        <span className="text-xs font-semibold text-gray-500">
+          {stats.totalQty} unidad(es) en {lotes} lote(s)
+        </span>
+      </div>
+      <div className="px-3 md:px-4 py-2 border-b border-gray-200">
+        <input
+          type="search"
+          value={busqueda}
+          onChange={(e) => onBusqueda(e.target.value)}
+          placeholder="Buscar en el stock"
+          aria-label="Buscar en el stock"
+          className="w-full min-w-0 border border-gray-200 rounded-lg bg-gray-50 focus:bg-white px-3 py-2 text-base md:text-sm outline-none focus:border-blue-500"
+        />
+      </div>
+      <div className={'hidden px-4 py-2 bg-gray-50 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wide ' + COLUMNAS_STOCK}>
+        <span>{columna}</span>
+        <span>Precios por unidad</span>
+        <span className="text-right">Acciones</span>
+      </div>
+    </Fragment>
   );
 }
 
 // Fila de stock: tarjeta apilada en celulares, fila de tres columnas en escritorio
 function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
   return (
-    <div className={'p-3 md:px-4 flex flex-col gap-2 hover:bg-gray-50 transition ' + COLUMNAS_STOCK}>
+    <div className={'p-3 md:px-4 flex flex-col gap-3 hover:bg-gray-50 transition ' + COLUMNAS_STOCK}>
       <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-semibold text-gray-800 text-sm">
-          <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-xs font-bold shadow-sm">x{item.cantidad}</span>
-          <span className="min-w-0 break-words">{titulo}</span>
-          <CirculoColor color={item.color} />
+        <div className="flex items-start gap-2">
+          <span className="shrink-0 bg-blue-600 text-white px-2 py-0.5 rounded text-xs font-bold shadow-sm" title="Unidades en stock">
+            {item.cantidad} u.
+          </span>
+          <span className="min-w-0 break-words font-bold text-gray-900 text-base md:text-sm leading-tight">{titulo}</span>
         </div>
-        {subtitulo && <div className="text-xs font-medium text-gray-500 mt-1 break-words">{subtitulo}</div>}
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-gray-600">
+          {item.color && (
+            <span className="inline-flex items-center gap-1">
+              <CirculoColor color={item.color} soloCirculo />
+              {item.color}
+            </span>
+          )}
+          {subtitulo.map((dato) => (
+            <span key={dato} className="break-words min-w-0">{dato}</span>
+          ))}
+        </div>
       </div>
-      <div className="text-sm">
-        <span className="text-red-500 font-medium">$ {fmt(item.costo_usd)}</span> /{' '}
-        <span className="text-green-600 font-bold">$ {fmt(item.precio_usd)}</span>
-        <span className="block text-[10px] text-gray-400 font-semibold">ARS $ {fmt(item.precio_usd * cot)}</span>
+      <div className="grid grid-cols-3 gap-2 bg-gray-50 md:bg-transparent rounded-lg p-2 md:p-0">
+        <DatoStock etiqueta="Costo USD" valor={'$ ' + fmt(item.costo_usd)} clase="text-red-500" />
+        <DatoStock etiqueta="Venta USD" valor={'$ ' + fmt(item.precio_usd)} clase="text-green-600" />
+        <DatoStock etiqueta="Venta ARS" valor={'$ ' + fmt(Math.round(item.precio_usd * cot))} clase="text-gray-800" />
       </div>
       <div className="md:text-right">
         <button
@@ -352,7 +405,7 @@ function Admin() {
 
   const estadoInicialCelular = { modelo: '', capacidad: '', color: '', bateria: '', costo_usd: '', precio_usd: '', detalles: '', cantidad: 1 };
   const estadoInicialAccesorio = { tipo: '', modelo: '', color: '', costo_usd: '', precio_usd: '', detalles: '', cantidad: 1 };
-  const estadoInicialPermuta = { modelo: '', capacidad: '', color: '', bateria: '', detalles: '', precio_ars: '', precio_venta_ars: '' };
+  const estadoInicialPermuta = { modelo: '', capacidad: '', color: '', bateria: '', detalles: '', precio_ars: '', precio_venta_ars: '', entregaId: '' };
 
   const [formCelular, setFormCelular] = useState(estadoInicialCelular);
   const [formAccesorio, setFormAccesorio] = useState(estadoInicialAccesorio);
@@ -367,8 +420,35 @@ function Admin() {
   const [mesSeleccionado, setMesSeleccionado] = useState('todos');
   const [paginaActual, setPaginaActual] = useState(1);
   const [menu, setMenu] = useState(null); // { key, item, tabla, top, right }
+  const [venta, setVenta] = useState(null); // { item, tabla, cantidad, mayorista }
+  const [busquedaStock, setBusquedaStock] = useState('');
+  const [dialogo, setDialogo] = useState(null); // { titulo, texto, botones: [{ etiqueta, clase, accion }] }
+  const [guardando, setGuardando] = useState(false);
+  const ocupado = useRef(false);
 
   const cot = Number(cotizacion) || 0;
+
+  // Evita que un doble toque dispare dos veces la misma operacion (por ejemplo, duplicar un ingreso)
+  const conBloqueo = (fn) => async (...args) => {
+    if (args[0] && typeof args[0].preventDefault === 'function') args[0].preventDefault();
+    if (ocupado.current) return;
+    ocupado.current = true;
+    setGuardando(true);
+    try {
+      await fn(...args);
+    } finally {
+      ocupado.current = false;
+      setGuardando(false);
+    }
+  };
+
+  // Lote del stock que se entrega al cliente en la permuta (opcional)
+  const lotePermuta = stockCelulares.find((c) => String(c.ids[0]) === formPermuta.entregaId) || null;
+
+  const cambiarTab = (tab) => {
+    setActiveTab(tab);
+    setBusquedaStock('');
+  };
 
   useEffect(() => {
     document.title = 'Montech | Admin';
@@ -394,10 +474,10 @@ function Admin() {
     // con el mismo criterio del catalogo publico (modelo, capacidad, color, precio)
     const [config, celDisponibles, accDisponibles, celVendidos, accVendidos] = await Promise.all([
       supabase.from('configuracion').select('*').eq('id', 1).single(),
-      supabase.from('celulares').select('*').eq('estado', 'disponible').order('modelo', { ascending: true }),
-      supabase.from('accesorios').select('*').eq('estado', 'disponible').order('tipo', { ascending: true }).order('modelo', { ascending: true }),
-      supabase.from('celulares').select('*').eq('estado', 'vendido'),
-      supabase.from('accesorios').select('*').eq('estado', 'vendido'),
+      traerTodo(() => supabase.from('celulares').select('*').eq('estado', 'disponible').order('modelo', { ascending: true }).order('id')),
+      traerTodo(() => supabase.from('accesorios').select('*').eq('estado', 'disponible').order('tipo', { ascending: true }).order('id')),
+      traerTodo(() => supabase.from('celulares').select('*').eq('estado', 'vendido').order('id')),
+      traerTodo(() => supabase.from('accesorios').select('*').eq('estado', 'vendido').order('id')),
     ]);
 
     const fallo = [config, celDisponibles, accDisponibles, celVendidos, accVendidos].find((r) => r.error);
@@ -539,12 +619,25 @@ function Admin() {
     };
 
     const { error } = await guardarLoteConPromedio('celulares', filaBase, 1, claveCelular);
-    if (!error) {
-      toast.success('Permuta registrada correctamente');
-      setShowPermutaModal(false);
-      setFormPermuta(estadoInicialPermuta);
-      cargarDatos(false);
-    } else toast.error('Error al registrar permuta: ' + error.message);
+    if (error) {
+      toast.error('Error al registrar permuta: ' + error.message);
+      return;
+    }
+
+    if (lotePermuta) {
+      // El equipo entregado sale del stock como una venta al precio del lote
+      const { error: errorEntrega } = await supabase
+        .from('celulares')
+        .update({ estado: 'vendido', fecha_venta: new Date().toISOString(), precio_usd: lotePermuta.precio_usd })
+        .eq('id', lotePermuta.ids[0]);
+      if (errorEntrega) toast.error('El equipo recibido se cargo, pero no se pudo registrar la entrega: ' + errorEntrega.message);
+      else toast.success('Permuta registrada: el equipo recibido entro al stock y el entregado quedo como vendido');
+    } else {
+      toast.success('Permuta registrada: el equipo recibido entro al stock');
+    }
+    setShowPermutaModal(false);
+    setFormPermuta(estadoInicialPermuta);
+    cargarDatos(false);
   }
 
   // ---------- Menu de opciones ----------
@@ -567,90 +660,66 @@ function Admin() {
   };
 
   // ---------- Ventas ----------
-  const confirmarVenta = (item, tabla) => {
-    const esAccesorioMultiple = tabla === 'accesorios' && item.cantidad > 1;
+  const confirmarVenta = (item, tabla) => setVenta({ item, tabla, cantidad: 1, mayorista: false });
 
-    toast(
-      (t) => (
-        <div>
-          <p className="font-bold text-gray-800 text-sm mb-3">Opciones de Venta</p>
-          <div className="flex flex-col gap-2">
-            <button
-              onClick={() => { toast.dismiss(t.id); ejecutarVenta([item.ids[0]], tabla, false, item.precio_usd); }}
-              className="bg-green-500 text-white px-3 py-2.5 rounded-lg text-xs font-bold hover:bg-green-600 transition"
-            >
-              {esAccesorioMultiple ? 'Vender 1 (Precio Contado)' : 'Confirmar venta (Precio Contado)'}
-            </button>
-            {esAccesorioMultiple && (
-              <button
-                onClick={() => { toast.dismiss(t.id); ejecutarVenta(item.ids, tabla, true, item.precio_usd); }}
-                className="bg-blue-600 text-white px-3 py-2.5 rounded-lg text-xs font-bold hover:bg-blue-700 transition"
-              >
-                Vender TODOS ({item.cantidad}) Mayorista -{descuentoMayorista}%
-              </button>
-            )}
-            <button
-              onClick={() => toast.dismiss(t.id)}
-              className="bg-gray-200 text-gray-800 px-3 py-2.5 rounded-lg text-xs font-bold hover:bg-gray-300 transition"
-            >
-              Cancelar
-            </button>
-          </div>
-        </div>
-      ),
-      { duration: Infinity, id: 'confirm-venta' }
-    );
-  };
+  // Cantidad a vender, siempre entre 1 y las unidades del lote
+  const cantidadVenta = venta ? Math.min(venta.item.cantidad, Math.max(1, parseInt(venta.cantidad) || 1)) : 0;
+  const precioVenta = venta
+    ? redondear(venta.item.precio_usd * (venta.mayorista ? 1 - Number(descuentoMayorista) / 100 : 1))
+    : 0;
 
   // La venta se registra al precio que muestra el lote (promedio), con descuento si es mayorista
-  async function ejecutarVenta(idsArray, tabla, esMayorista, precioLote) {
-    const factor = esMayorista ? 1 - Number(descuentoMayorista) / 100 : 1;
-    const updates = {
-      estado: 'vendido',
-      fecha_venta: new Date().toISOString(),
-      precio_usd: redondear(precioLote * factor),
-    };
-    const { error } = await supabase.from(tabla).update(updates).in('id', idsArray);
+  async function ejecutarVenta() {
+    const { item, tabla } = venta;
+    const ids = item.ids.slice(0, cantidadVenta);
+    setVenta(null);
+    const { error } = await supabase
+      .from(tabla)
+      .update({ estado: 'vendido', fecha_venta: new Date().toISOString(), precio_usd: precioVenta })
+      .in('id', ids);
     if (error) {
       toast.error('Error al registrar la venta: ' + error.message);
       return;
     }
-    toast.success(idsArray.length + ' venta(s) registrada(s)');
+    toast.success(ids.length + ' venta(s) registrada(s)');
+    cargarDatos(false);
+  }
+
+  // Anular una venta cargada por error: la unidad vuelve al stock
+  const confirmarAnulacion = (item) =>
+    setDialogo({
+      titulo: 'Anular esta venta?',
+      texto: 'La unidad vuelve al stock disponible.',
+      botones: [{ etiqueta: 'Anular venta', clase: 'bg-red-600 hover:bg-red-700', accion: () => anularVenta(item) }],
+    });
+
+  async function anularVenta(item) {
+    const tabla = item.categoria === 'celular' ? 'celulares' : 'accesorios';
+    const { error } = await supabase.from(tabla).update({ estado: 'disponible', fecha_venta: null }).eq('id', item.id);
+    if (error) {
+      toast.error('Error al anular la venta: ' + error.message);
+      return;
+    }
+    toast.success('Venta anulada, la unidad volvio al stock');
     cargarDatos(false);
   }
 
   // ---------- Borrado ----------
   const confirmarBorrado = (item, tabla) => {
-    toast(
-      (t) => (
-        <div>
-          <p className="font-bold text-gray-800 text-sm mb-3">Cuantas unidades queres borrar?</p>
-          <div className="flex flex-wrap justify-end gap-2">
-            <button
-              onClick={() => { toast.dismiss(t.id); ejecutarBorrado([item.ids[0]], tabla); }}
-              className="bg-red-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-600"
-            >
-              Borrar 1
-            </button>
-            {item.cantidad > 1 && (
-              <button
-                onClick={() => { toast.dismiss(t.id); ejecutarBorrado(item.ids, tabla); }}
-                className="bg-red-700 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-800"
-              >
-                Borrar TODOS
-              </button>
-            )}
-            <button
-              onClick={() => toast.dismiss(t.id)}
-              className="bg-gray-200 text-gray-800 px-3 py-2 rounded-lg text-xs font-bold hover:bg-gray-300"
-            >
-              Cancelar
-            </button>
-          </div>
-        </div>
-      ),
-      { duration: Infinity, id: 'confirm-borrar' }
-    );
+    const nombre = tabla === 'celulares' ? item.modelo + ' ' + (item.capacidad || '') : item.tipo + ' - ' + item.modelo;
+    const botones = [{ etiqueta: 'Borrar 1 unidad', clase: 'bg-red-500 hover:bg-red-600', accion: () => ejecutarBorrado([item.ids[0]], tabla) }];
+    if (item.cantidad > 1) {
+      botones.push({
+        etiqueta: 'Borrar las ' + item.cantidad + ' unidades',
+        clase: 'bg-red-700 hover:bg-red-800',
+        accion: () => ejecutarBorrado(item.ids, tabla),
+      });
+    }
+    setDialogo({
+      titulo: 'Borrar del stock',
+      texto: nombre + (item.color ? ' - ' + item.color : '') + '. Esta accion no se puede deshacer.',
+      botones,
+    });
   };
 
   async function ejecutarBorrado(idsArray, tabla) {
@@ -752,6 +821,18 @@ function Admin() {
   const statsCelulares = calcularStats(stockCelulares, cot);
   const statsAccesorios = calcularStats(stockAccesorios, cot);
 
+  // Buscador del stock: todas las palabras escritas deben aparecer en alguno de los campos
+  const filtrarStock = (lista, campos) => {
+    const palabras = sinTildes(busquedaStock).split(/\s+/).filter(Boolean);
+    if (palabras.length === 0) return lista;
+    return lista.filter((item) => {
+      const texto = sinTildes(campos.map((c) => item[c]).join(' '));
+      return palabras.every((p) => texto.includes(p));
+    });
+  };
+  const celularesVisibles = filtrarStock(stockCelulares, ['modelo', 'capacidad', 'color', 'detalles']);
+  const accesoriosVisibles = filtrarStock(stockAccesorios, ['tipo', 'modelo', 'color', 'detalles']);
+
   const mesesDisponibles = [...new Set(ventasGlobales.map((v) => obtenerMesAnio(v.fecha_venta)))]
     .filter((m) => m !== 'Sin fecha')
     .sort()
@@ -788,7 +869,7 @@ function Admin() {
     'flex-1 md:flex-none py-3 px-6 text-sm font-bold rounded-t-lg transition ' +
     (activeTab === tab ? 'bg-white border-t border-l border-r border-gray-200 text-blue-600' : 'text-gray-500 hover:bg-gray-100');
 
-  const claseBotonAgregar = 'flex-1 bg-blue-600 text-white py-3 md:py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition text-sm';
+  const claseBotonAgregar = 'flex-1 bg-blue-600 text-white py-3 md:py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition text-sm disabled:opacity-60';
 
   return (
     <div className="min-h-screen p-3 md:p-8 text-gray-800 bg-gray-50 overflow-x-hidden">
@@ -840,7 +921,7 @@ function Admin() {
             />
           </label>
           <button
-            onClick={handleActualizarConfiguracion}
+            onClick={conBloqueo(handleActualizarConfiguracion)}
             className="col-span-2 bg-gray-900 text-white px-4 py-2.5 md:py-2 rounded-lg text-sm font-medium hover:bg-gray-800 transition"
           >
             Guardar
@@ -851,8 +932,8 @@ function Admin() {
       <div className="flex flex-col gap-6 md:gap-8 max-w-6xl mx-auto w-full">
         {/* TABS */}
         <div className="flex gap-2 border-b border-gray-200">
-          <button onClick={() => setActiveTab('celulares')} className={claseTab('celulares')}>Celulares</button>
-          <button onClick={() => setActiveTab('accesorios')} className={claseTab('accesorios')}>Accesorios</button>
+          <button onClick={() => cambiarTab('celulares')} className={claseTab('celulares')}>Celulares</button>
+          <button onClick={() => cambiarTab('accesorios')} className={claseTab('accesorios')}>Accesorios</button>
         </div>
 
         {/* ===================== TAB CELULARES ===================== */}
@@ -860,7 +941,7 @@ function Admin() {
           <div className="space-y-4 md:space-y-6">
             <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200">
               <h2 className="text-lg font-bold mb-4 md:mb-5 text-gray-800">Nuevo Ingreso de Celular</h2>
-              <form onSubmit={handleGuardarCelular} autoComplete="off" className="flex flex-col md:flex-row gap-3">
+              <form onSubmit={conBloqueo(handleGuardarCelular)} autoComplete="off" className="flex flex-col md:flex-row gap-3">
                 <div className="flex-1 grid grid-cols-2 md:grid-cols-4 gap-3">
                   <input required name="modelo" value={formCelular.modelo} onChange={handleChangeCelular} type="text" placeholder="Mod. (Ej: 14 PRO)" className={claseInput} />
                   <input required name="capacidad" value={formCelular.capacidad} onChange={handleChangeCelular} type="text" placeholder="Cap. (Ej: 128)" className={claseInput} />
@@ -880,7 +961,7 @@ function Admin() {
                     <span className="absolute left-3 top-3 text-gray-500 text-sm font-semibold">Cant:</span>
                     <input required name="cantidad" value={formCelular.cantidad} onChange={handleChangeCelular} type="number" min="1" className={claseInput + ' pl-12 font-bold'} />
                   </div>
-                  <button type="submit" className={claseBotonAgregar}>Agregar</button>
+                  <button type="submit" disabled={guardando} className={claseBotonAgregar}>{guardando ? 'Guardando...' : 'Agregar'}</button>
                 </div>
               </form>
               <p className="text-[11px] text-gray-400 mt-3">
@@ -891,9 +972,9 @@ function Admin() {
             <ResumenStock etiqueta="Total Celulares" stats={statsCelulares} />
 
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-              <EncabezadoStock titulo="Equipo" />
+              <EncabezadoStock titulo="Stock de Celulares" columna="Equipo" stats={statsCelulares} lotes={stockCelulares.length} busqueda={busquedaStock} onBusqueda={setBusquedaStock} />
               <div className="divide-y divide-gray-100 md:max-h-[400px] md:overflow-y-auto">
-                {stockCelulares.map((celu) =>
+                {celularesVisibles.map((celu) =>
                   editandoCelularId === celu.ids[0] ? (
                     <div key={celu.ids[0]} className="p-3 md:p-4 bg-blue-50/40">
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
@@ -923,7 +1004,7 @@ function Admin() {
                         cantidad={celu.cantidad}
                         valor={formEdicionCelular.cantidadAEditar}
                         onChange={handleChangeEdicionCelular}
-                        onGuardar={guardarEdicionCelular}
+                        onGuardar={conBloqueo(guardarEdicionCelular)}
                         onCancelar={() => setEditandoCelularId(null)}
                       />
                     </div>
@@ -932,14 +1013,18 @@ function Admin() {
                       key={celu.ids[0]}
                       item={celu}
                       titulo={celu.modelo + ' ' + (celu.capacidad || '')}
-                      subtitulo={'Bat: ' + celu.bateria + '%' + (celu.detalles ? ' | ' + celu.detalles : '')}
+                      subtitulo={['Bateria ' + celu.bateria + '%', celu.detalles].filter(Boolean)}
                       cot={cot}
                       onOpciones={(e) => abrirMenu(e, celu, 'celulares')}
                     />
                   )
                 )}
               </div>
-              {stockCelulares.length === 0 && <p className="text-center p-8 text-gray-500">No hay celulares en stock.</p>}
+              {celularesVisibles.length === 0 && (
+                <p className="text-center p-8 text-gray-500">
+                  {stockCelulares.length === 0 ? 'No hay celulares en stock.' : 'Ningun equipo coincide con la busqueda.'}
+                </p>
+              )}
             </div>
           </div>
         )}
@@ -949,7 +1034,7 @@ function Admin() {
           <div className="space-y-4 md:space-y-6">
             <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200">
               <h2 className="text-lg font-bold mb-4 md:mb-5 text-gray-800">Nuevo Ingreso de Accesorio</h2>
-              <form onSubmit={handleGuardarAccesorio} autoComplete="off" className="flex flex-col md:flex-row gap-3">
+              <form onSubmit={conBloqueo(handleGuardarAccesorio)} autoComplete="off" className="flex flex-col md:flex-row gap-3">
                 <div className="flex-1 grid grid-cols-2 md:grid-cols-3 gap-3">
                   <input required name="tipo" value={formAccesorio.tipo} onChange={handleChangeAccesorio} type="text" placeholder="Tipo (Ej: Funda)" className={claseInput} />
                   <input required name="modelo" value={formAccesorio.modelo} onChange={handleChangeAccesorio} type="text" placeholder="Mod. (Ej: iPhone 13)" className={claseInput} />
@@ -968,7 +1053,7 @@ function Admin() {
                     <span className="absolute left-3 top-3 text-gray-500 text-sm font-semibold">Cant:</span>
                     <input required name="cantidad" value={formAccesorio.cantidad} onChange={handleChangeAccesorio} type="number" min="1" className={claseInput + ' pl-12 font-bold'} />
                   </div>
-                  <button type="submit" className={claseBotonAgregar}>Agregar</button>
+                  <button type="submit" disabled={guardando} className={claseBotonAgregar}>{guardando ? 'Guardando...' : 'Agregar'}</button>
                 </div>
               </form>
               <p className="text-[11px] text-gray-400 mt-3">
@@ -979,9 +1064,9 @@ function Admin() {
             <ResumenStock etiqueta="Total Accesorios" stats={statsAccesorios} />
 
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-              <EncabezadoStock titulo="Accesorio" />
+              <EncabezadoStock titulo="Stock de Accesorios" columna="Accesorio" stats={statsAccesorios} lotes={stockAccesorios.length} busqueda={busquedaStock} onBusqueda={setBusquedaStock} />
               <div className="divide-y divide-gray-100 md:max-h-[400px] md:overflow-y-auto">
-                {stockAccesorios.map((acc) =>
+                {accesoriosVisibles.map((acc) =>
                   editandoAccesorioId === acc.ids[0] ? (
                     <div key={acc.ids[0]} className="p-3 md:p-4 bg-blue-50/40">
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
@@ -1008,7 +1093,7 @@ function Admin() {
                         cantidad={acc.cantidad}
                         valor={formEdicionAccesorio.cantidadAEditar}
                         onChange={handleChangeEdicionAccesorio}
-                        onGuardar={guardarEdicionAccesorio}
+                        onGuardar={conBloqueo(guardarEdicionAccesorio)}
                         onCancelar={() => setEditandoAccesorioId(null)}
                       />
                     </div>
@@ -1017,14 +1102,18 @@ function Admin() {
                       key={acc.ids[0]}
                       item={acc}
                       titulo={acc.tipo + ' - ' + acc.modelo}
-                      subtitulo={acc.detalles}
+                      subtitulo={[acc.detalles].filter(Boolean)}
                       cot={cot}
                       onOpciones={(e) => abrirMenu(e, acc, 'accesorios')}
                     />
                   )
                 )}
               </div>
-              {stockAccesorios.length === 0 && <p className="text-center p-8 text-gray-500">No hay accesorios en stock.</p>}
+              {accesoriosVisibles.length === 0 && (
+                <p className="text-center p-8 text-gray-500">
+                  {stockAccesorios.length === 0 ? 'No hay accesorios en stock.' : 'Ningun accesorio coincide con la busqueda.'}
+                </p>
+              )}
             </div>
           </div>
         )}
@@ -1067,7 +1156,7 @@ function Admin() {
               <p className="text-xl md:text-3xl font-black mt-1 text-green-600 break-words">$ {fmt(gananciaVentasUSD)}</p>
             </div>
             <div className="min-w-0 bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-emerald-400 col-span-2 md:col-span-1">
-              <p className="text-gray-500 text-xs md:text-sm font-medium">Ganancia (ARS)</p>
+              <p className="text-gray-500 text-xs md:text-sm font-medium">Ganancia (ARS, al dolar de hoy)</p>
               <p className="text-xl md:text-3xl font-black mt-1 text-emerald-600 break-words">$ {fmt(gananciaVentasARS)}</p>
             </div>
           </div>
@@ -1105,14 +1194,22 @@ function Admin() {
                           <CirculoColor color={item.color} />
                         </div>
                       </div>
-                      <span
-                        className={
-                          'shrink-0 font-bold text-sm px-2 py-1 rounded whitespace-nowrap ' +
-                          (ganancia < 0 ? 'text-red-600 bg-red-50' : 'text-green-600 bg-green-50')
-                        }
-                      >
-                        {ganancia < 0 ? '-' : '+'} $ {fmt(Math.abs(ganancia))}
-                      </span>
+                      <div className="shrink-0 flex flex-col items-end gap-1">
+                        <span
+                          className={
+                            'font-bold text-sm px-2 py-1 rounded whitespace-nowrap ' +
+                            (ganancia < 0 ? 'text-red-600 bg-red-50' : 'text-green-600 bg-green-50')
+                          }
+                        >
+                          {ganancia < 0 ? '-' : '+'} $ {fmt(Math.abs(ganancia))}
+                        </span>
+                        <button
+                          onClick={() => confirmarAnulacion(item)}
+                          className="text-[11px] font-bold text-gray-400 hover:text-red-500 hover:underline py-1"
+                        >
+                          Anular venta
+                        </button>
+                      </div>
                     </div>
                   );
                 })}
@@ -1200,14 +1297,138 @@ function Admin() {
         </Fragment>
       )}
 
+      {/* DIALOGO DE CONFIRMACION */}
+      {dialogo && (
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100">
+            <h2 className="text-lg font-bold text-gray-900">{dialogo.titulo}</h2>
+            <p className="text-sm text-gray-600 mt-1 break-words">{dialogo.texto}</p>
+            <div className="flex flex-col gap-2 mt-4">
+              {dialogo.botones.map((boton) => (
+                <button
+                  key={boton.etiqueta}
+                  type="button"
+                  disabled={guardando}
+                  onClick={conBloqueo(async () => {
+                    setDialogo(null);
+                    await boton.accion();
+                  })}
+                  className={'text-white px-4 py-2.5 rounded-lg text-sm font-bold transition disabled:opacity-60 ' + boton.clase}
+                >
+                  {boton.etiqueta}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => setDialogo(null)}
+                className="bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-gray-300 transition"
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE VENTA */}
+      {venta && (
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto">
+            <h2 className="text-xl font-bold text-gray-800">Registrar Venta</h2>
+            <p className="text-sm font-semibold text-gray-600 mt-1 break-words">
+              {venta.tabla === 'celulares'
+                ? venta.item.modelo + ' ' + (venta.item.capacidad || '') + ' - Bateria ' + venta.item.bateria + '%'
+                : venta.item.tipo + ' - ' + venta.item.modelo}
+              {venta.item.color ? ' - ' + venta.item.color : ''}
+            </p>
+
+            <label className="text-xs font-bold text-gray-600 mt-4 mb-1 block">
+              Cuantas unidades vendiste? (hay {venta.item.cantidad} en stock)
+            </label>
+            <div className="flex items-stretch gap-2">
+              <button
+                type="button"
+                aria-label="Restar una unidad"
+                onClick={() => setVenta({ ...venta, cantidad: Math.max(1, cantidadVenta - 1) })}
+                disabled={cantidadVenta <= 1}
+                className="w-12 shrink-0 bg-gray-200 text-gray-800 rounded-lg font-black text-xl hover:bg-gray-300 disabled:opacity-40"
+              >
+                -
+              </button>
+              <input
+                type="number"
+                min="1"
+                max={venta.item.cantidad}
+                value={venta.cantidad}
+                onChange={(e) => setVenta({ ...venta, cantidad: e.target.value })}
+                onBlur={() => setVenta({ ...venta, cantidad: cantidadVenta })}
+                className="flex-1 min-w-0 border border-gray-300 rounded-lg p-2.5 text-center text-lg font-black text-gray-800 outline-none focus:border-blue-500"
+              />
+              <button
+                type="button"
+                aria-label="Sumar una unidad"
+                onClick={() => setVenta({ ...venta, cantidad: Math.min(venta.item.cantidad, cantidadVenta + 1) })}
+                disabled={cantidadVenta >= venta.item.cantidad}
+                className="w-12 shrink-0 bg-gray-200 text-gray-800 rounded-lg font-black text-xl hover:bg-gray-300 disabled:opacity-40"
+              >
+                +
+              </button>
+            </div>
+            {venta.item.cantidad > 1 && (
+              <button
+                type="button"
+                onClick={() => setVenta({ ...venta, cantidad: venta.item.cantidad })}
+                className="mt-2 text-xs font-bold text-blue-600 hover:underline py-1"
+              >
+                Vender todas ({venta.item.cantidad})
+              </button>
+            )}
+
+            <label className="mt-3 flex items-center gap-2 bg-blue-50 border border-blue-100 rounded-lg p-3 text-sm font-bold text-blue-800 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={venta.mayorista}
+                onChange={(e) => setVenta({ ...venta, mayorista: e.target.checked })}
+                className="w-4 h-4"
+              />
+              Precio mayorista (-{descuentoMayorista}%)
+            </label>
+
+            <div className="mt-3 bg-green-50 border border-green-100 rounded-lg p-3">
+              <div className="flex justify-between gap-2 text-xs font-semibold text-gray-600">
+                <span>Precio por unidad</span>
+                <span>USD {fmt(precioVenta)}</span>
+              </div>
+              <div className="flex justify-between gap-2 mt-1 text-base font-black text-green-700">
+                <span>Total ({cantidadVenta} u.)</span>
+                <span>USD {fmt(precioVenta * cantidadVenta)}</span>
+              </div>
+              <p className="text-right text-xs font-bold text-gray-500 mt-0.5">ARS $ {fmt(Math.round(precioVenta * cantidadVenta * cot))}</p>
+            </div>
+
+            <div className="flex gap-3 mt-4">
+              <button type="button" onClick={() => setVenta(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
+                Cancelar
+              </button>
+              <button type="button" onClick={conBloqueo(ejecutarVenta)} disabled={guardando} className="disabled:opacity-60 flex-1 bg-green-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-green-700 transition">
+                Confirmar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MODAL DE PERMUTAS */}
       {showPermutaModal && (
         <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto">
-            <h2 className="text-xl font-bold mb-4 text-gray-800">Registrar Equipo en Permuta</h2>
-            <form onSubmit={handleGuardarPermuta} autoComplete="off" className="grid grid-cols-2 gap-3">
+            <h2 className="text-xl font-bold text-gray-800">Registrar Permuta</h2>
+            <p className="text-xs font-bold text-purple-700 uppercase tracking-wide mt-3 mb-2">
+              1. Equipo que recibis (entra al stock)
+            </p>
+            <form onSubmit={conBloqueo(handleGuardarPermuta)} autoComplete="off" className="grid grid-cols-2 gap-3">
               <div className="col-span-2">
-                <label className="text-xs font-bold text-gray-600 mb-1 block">Modelo del equipo usado</label>
+                <label className="text-xs font-bold text-gray-600 mb-1 block">Modelo</label>
                 <input required name="modelo" value={formPermuta.modelo} onChange={handleChangePermuta} type="text" placeholder="Ej: 11 PRO" className={claseInputModal} />
               </div>
               <div className="min-w-0">
@@ -1245,11 +1466,46 @@ function Admin() {
                     : '0.00'}
                 </p>
               </div>
+              <div className="col-span-2 border-t border-gray-200 pt-3">
+                <p className="text-xs font-bold text-purple-700 uppercase tracking-wide mb-2">
+                  2. Equipo que entregas (sale del stock) - opcional
+                </p>
+                <select
+                  name="entregaId"
+                  value={formPermuta.entregaId}
+                  onChange={handleChangePermuta}
+                  className={claseInputModal + ' text-gray-700'}
+                >
+                  <option value="">No entrego equipo / lo cargo despues</option>
+                  {stockCelulares.map((c) => (
+                    <option key={c.ids[0]} value={c.ids[0]}>
+                      {c.modelo} {c.capacidad} {c.color} - Bat {c.bateria}% - ARS $ {fmt(Math.round(c.precio_usd * cot))} ({c.cantidad} u.)
+                    </option>
+                  ))}
+                </select>
+                {lotePermuta && (
+                  <div className="mt-2 bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs font-semibold text-gray-600">
+                    <div className="flex justify-between gap-2">
+                      <span>Precio del equipo que entregas</span>
+                      <span>ARS $ {fmt(Math.round(lotePermuta.precio_usd * cot))}</span>
+                    </div>
+                    <div className="flex justify-between gap-2 mt-1">
+                      <span>Menos el equipo que recibis</span>
+                      <span>ARS $ {fmt(Number(formPermuta.precio_ars) || 0)}</span>
+                    </div>
+                    <div className="flex justify-between gap-2 mt-1 text-sm font-black text-gray-900">
+                      <span>Diferencia a cobrar</span>
+                      <span>ARS $ {fmt(Math.round(lotePermuta.precio_usd * cot) - (Number(formPermuta.precio_ars) || 0))}</span>
+                    </div>
+                    <p className="mt-2 font-medium text-gray-500">Al guardar, una unidad de este equipo queda como vendida.</p>
+                  </div>
+                )}
+              </div>
               <div className="col-span-2 flex gap-3 mt-1">
                 <button type="button" onClick={() => setShowPermutaModal(false)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
                   Cancelar
                 </button>
-                <button type="submit" className="flex-1 bg-purple-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-purple-700 transition">
+                <button type="submit" disabled={guardando} className="disabled:opacity-60 flex-1 bg-purple-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-purple-700 transition">
                   Guardar Permuta
                 </button>
               </div>
