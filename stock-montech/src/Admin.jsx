@@ -558,7 +558,7 @@ function Admin() {
   const [mesSeleccionado, setMesSeleccionado] = useState('todos');
   const [paginaActual, setPaginaActual] = useState(1);
   const [menu, setMenu] = useState(null); // { key, item, tabla, top, right }
-  const [venta, setVenta] = useState(null); // { item, tabla, cantidad, mayorista, precio (USD por unidad, solo celulares) }
+  const [venta, setVenta] = useState(null); // { item, tabla, cantidad, mayorista, precio (ARS por unidad, celulares), accesorios (ids de lote) }
   const [busquedaStock, setBusquedaStock] = useState('');
   // En pantallas chicas el formulario de ingreso y las familias del stock arrancan cerrados
   const [esEscritorio] = useState(() => window.matchMedia('(min-width: 768px)').matches);
@@ -821,24 +821,43 @@ function Admin() {
   };
 
   // ---------- Ventas ----------
-  const confirmarVenta = (item, tabla) => setVenta({ item, tabla, cantidad: 1, mayorista: false, precio: item.precio_usd });
+  const confirmarVenta = (item, tabla) =>
+    setVenta({ item, tabla, cantidad: 1, mayorista: false, precio: Math.round(item.precio_usd * cot), accesorios: [] });
 
   // Cantidad a vender, siempre entre 1 y las unidades del lote
   const cantidadVenta = venta ? Math.min(venta.item.cantidad, Math.max(1, parseInt(venta.cantidad) || 1)) : 0;
   // El descuento mayorista solo aplica a accesorios vendidos por cantidad (2 o mas unidades)
   const admiteMayorista = venta ? venta.tabla === 'accesorios' : false;
   const mayoristaActivo = admiteMayorista && venta.mayorista && cantidadVenta >= 2;
-  // En celulares el precio final por unidad se puede cambiar al vender (por ejemplo, si la
-  // operacion incluyo accesorios); en accesorios sale del lote, con descuento si es mayorista
-  const precioManual = venta && venta.tabla === 'celulares' ? parseFloat(venta.precio) : NaN;
-  const precioManualValido = precioManual >= 0;
+
+  // En celulares el precio final por unidad se carga en pesos y se puede cambiar al vender.
+  // Si no se toco, se conserva el precio exacto en USD del lote.
+  const precioManualArs = venta && venta.tabla === 'celulares' ? parseFloat(venta.precio) : NaN;
+  const precioManualValido = precioManualArs >= 0 && cot > 0;
+  const precioSinCambios = venta ? precioManualArs === Math.round(venta.item.precio_usd * cot) : false;
   const precioVenta = !venta
     ? 0
     : venta.tabla === 'celulares'
-    ? redondear(precioManualValido ? precioManual : 0)
+    ? redondear(!precioManualValido ? 0 : precioSinCambios ? venta.item.precio_usd : precioManualArs / cot)
     : redondear(venta.item.precio_usd * (mayoristaActivo ? 1 - Number(descuentoMayorista) / 100 : 1));
 
-  // La venta se registra al precio que muestra el lote (promedio), con descuento si es mayorista
+  // Accesorios vendidos junto al celular: cada vez que se elige uno se suma una unidad de ese lote
+  const accesoriosVenta = venta
+    ? stockAccesorios
+        .map((lote) => ({ lote, cantidad: (venta.accesorios || []).filter((id) => id === String(lote.ids[0])).length }))
+        .filter((a) => a.cantidad > 0)
+    : [];
+  const totalAccesoriosUsd = accesoriosVenta.reduce((acc, a) => acc + a.lote.precio_usd * a.cantidad, 0);
+  const totalOperacionArs = Math.round((precioVenta * cantidadVenta + totalAccesoriosUsd) * cot);
+
+  const quitarAccesorioVenta = (id) => {
+    const lista = [...venta.accesorios];
+    lista.splice(lista.lastIndexOf(id), 1);
+    setVenta({ ...venta, accesorios: lista });
+  };
+
+  // La venta se registra al precio final cargado (celulares) o al del lote, con descuento
+  // mayorista si corresponde (accesorios). Los accesorios elegidos salen del stock a su precio.
   async function ejecutarVenta() {
     const { item, tabla } = venta;
     if (tabla === 'celulares' && !precioManualValido) {
@@ -846,16 +865,34 @@ function Admin() {
       return;
     }
     const ids = item.ids.slice(0, cantidadVenta);
+    const fecha = new Date().toISOString();
+    const accesorios = accesoriosVenta;
     setVenta(null);
     const { error } = await supabase
       .from(tabla)
-      .update({ estado: 'vendido', fecha_venta: new Date().toISOString(), precio_usd: precioVenta })
+      .update({ estado: 'vendido', fecha_venta: fecha, precio_usd: precioVenta })
       .in('id', ids);
     if (error) {
       toast.error('Error al registrar la venta: ' + error.message);
       return;
     }
-    toast.success(ids.length + ' venta(s) registrada(s)');
+
+    let unidadesAccesorios = 0;
+    for (const { lote, cantidad } of accesorios) {
+      const { error: errorAccesorio } = await supabase
+        .from('accesorios')
+        .update({ estado: 'vendido', fecha_venta: fecha, precio_usd: lote.precio_usd })
+        .in('id', lote.ids.slice(0, cantidad));
+      if (errorAccesorio) {
+        toast.error('El celular se vendio, pero no se pudo descontar ' + lote.tipo + ' ' + lote.modelo + ': ' + errorAccesorio.message);
+      } else {
+        unidadesAccesorios += cantidad;
+      }
+    }
+
+    toast.success(
+      ids.length + ' venta(s) registrada(s)' + (unidadesAccesorios > 0 ? ' y ' + unidadesAccesorios + ' accesorio(s) descontado(s)' : '')
+    );
     cargarDatos(false);
   }
 
@@ -2133,7 +2170,7 @@ function Admin() {
             {venta.tabla === 'celulares' && (
               <Fragment>
                 <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">
-                  Precio final de venta (USD por unidad)
+                  Precio final del celular (pesos ARS por unidad)
                 </label>
                 <input
                   type="number"
@@ -2144,8 +2181,51 @@ function Admin() {
                   className={claseInputModal + ' font-bold'}
                 />
                 <p className="text-[11px] font-medium text-gray-500 mt-1">
-                  Precio de lista: USD {fmt(venta.item.precio_usd)}. Cambialo si la operacion se cerro por otro monto (por ejemplo, si llevo accesorios).
+                  Precio de lista: ARS $ {fmt(Math.round(venta.item.precio_usd * cot))}. Cambialo si lo vendiste a otro precio.
                   {cantidadVenta > 1 ? ' Se aplica a cada una de las ' + cantidadVenta + ' unidades.' : ''}
+                </p>
+
+                <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">
+                  Accesorios que se llevo con el celular (opcional)
+                </label>
+                <select
+                  value=""
+                  onChange={(e) => setVenta({ ...venta, accesorios: [...venta.accesorios, e.target.value] })}
+                  className={claseInputModal + ' text-gray-700'}
+                >
+                  <option value="">{stockAccesorios.length === 0 ? 'No hay accesorios en stock' : 'Agregar un accesorio...'}</option>
+                  {stockAccesorios.map((lote) => {
+                    const elegidos = venta.accesorios.filter((id) => id === String(lote.ids[0])).length;
+                    return (
+                      <option key={lote.ids[0]} value={lote.ids[0]} disabled={elegidos >= lote.cantidad}>
+                        {lote.tipo} {lote.modelo} {lote.color} - ARS $ {fmt(Math.round(lote.precio_usd * cot))} ({lote.cantidad - elegidos} u.)
+                      </option>
+                    );
+                  })}
+                </select>
+                {accesoriosVenta.length > 0 && (
+                  <ul className="mt-2 space-y-1.5">
+                    {accesoriosVenta.map(({ lote, cantidad }) => (
+                      <li key={lote.ids[0]} className="flex items-center justify-between gap-2 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                        <span className="min-w-0 text-xs font-bold text-gray-800 break-words">
+                          {cantidad} x {lote.tipo} {lote.modelo}
+                          <span className="block text-[11px] font-semibold text-gray-500">
+                            ARS $ {fmt(Math.round(lote.precio_usd * cot * cantidad))}
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => quitarAccesorioVenta(String(lote.ids[0]))}
+                          className="shrink-0 text-xs font-bold text-red-500 hover:underline py-1 px-1"
+                        >
+                          Quitar
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <p className="text-[11px] font-medium text-gray-500 mt-1">
+                  Al confirmar, cada accesorio elegido se descuenta del stock y queda como vendido a su precio.
                 </p>
               </Fragment>
             )}
@@ -2177,23 +2257,45 @@ function Admin() {
               </label>
             )}
 
-            <div className="mt-3 bg-green-50 border border-green-100 rounded-lg p-3">
-              {mayoristaActivo && (
-                <div className="flex justify-between gap-2 text-xs font-semibold text-gray-500">
-                  <span>Precio de lista por unidad</span>
-                  <span className="line-through">USD {fmt(venta.item.precio_usd)}</span>
+            {venta.tabla === 'celulares' ? (
+              <div className="mt-3 bg-green-50 border border-green-100 rounded-lg p-3">
+                <div className="flex justify-between gap-2 text-xs font-semibold text-gray-600">
+                  <span>Celular ({cantidadVenta} u.)</span>
+                  <span>ARS $ {fmt(Math.round(precioVenta * cantidadVenta * cot))}</span>
                 </div>
-              )}
-              <div className="flex justify-between gap-2 text-xs font-semibold text-gray-600">
-                <span>{mayoristaActivo ? 'Precio mayorista por unidad (-' + descuentoMayorista + '%)' : 'Precio por unidad'}</span>
-                <span>USD {fmt(precioVenta)}</span>
+                {accesoriosVenta.length > 0 && (
+                  <div className="flex justify-between gap-2 mt-0.5 text-xs font-semibold text-gray-600">
+                    <span>Accesorios ({accesoriosVenta.reduce((acc, a) => acc + a.cantidad, 0)} u.)</span>
+                    <span>ARS $ {fmt(Math.round(totalAccesoriosUsd * cot))}</span>
+                  </div>
+                )}
+                <div className="flex justify-between gap-2 mt-1 text-base font-black text-green-700">
+                  <span>Total a cobrar</span>
+                  <span>ARS $ {fmt(totalOperacionArs)}</span>
+                </div>
+                <p className="text-right text-xs font-bold text-gray-500 mt-0.5">
+                  USD {fmt(precioVenta * cantidadVenta + totalAccesoriosUsd)}
+                </p>
               </div>
-              <div className="flex justify-between gap-2 mt-1 text-base font-black text-green-700">
-                <span>Total ({cantidadVenta} u.)</span>
-                <span>USD {fmt(precioVenta * cantidadVenta)}</span>
+            ) : (
+              <div className="mt-3 bg-green-50 border border-green-100 rounded-lg p-3">
+                {mayoristaActivo && (
+                  <div className="flex justify-between gap-2 text-xs font-semibold text-gray-500">
+                    <span>Precio de lista por unidad</span>
+                    <span className="line-through">USD {fmt(venta.item.precio_usd)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between gap-2 text-xs font-semibold text-gray-600">
+                  <span>{mayoristaActivo ? 'Precio mayorista por unidad (-' + descuentoMayorista + '%)' : 'Precio por unidad'}</span>
+                  <span>USD {fmt(precioVenta)}</span>
+                </div>
+                <div className="flex justify-between gap-2 mt-1 text-base font-black text-green-700">
+                  <span>Total ({cantidadVenta} u.)</span>
+                  <span>USD {fmt(precioVenta * cantidadVenta)}</span>
+                </div>
+                <p className="text-right text-xs font-bold text-gray-500 mt-0.5">ARS $ {fmt(Math.round(precioVenta * cantidadVenta * cot))}</p>
               </div>
-              <p className="text-right text-xs font-bold text-gray-500 mt-0.5">ARS $ {fmt(Math.round(precioVenta * cantidadVenta * cot))}</p>
-            </div>
+            )}
 
             <div className="flex gap-3 mt-4">
               <button type="button" onClick={() => setVenta(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
