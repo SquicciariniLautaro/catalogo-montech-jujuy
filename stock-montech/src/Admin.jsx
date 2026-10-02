@@ -49,8 +49,9 @@ const claseInputEdicion = 'mt-1 border border-gray-300 p-2 rounded-lg w-full min
 
 const fmt = (n) => Number(n).toLocaleString('es-AR', { maximumFractionDigits: 2 });
 
-// Redondea a 2 decimales
-const redondear = (n) => Math.round((Number(n) || 0) * 100) / 100;
+// Redondea a 4 decimales: los precios en USD admiten mas de 2 decimales para que
+// el precio en pesos pueda quedar en un numero redondo
+const redondear = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
 
 // Normaliza texto para comparar: quita caracteres raros, espacios repetidos y pasa a mayusculas
 const normalizar = (v) =>
@@ -870,6 +871,14 @@ function Admin() {
   const pagina = Math.min(paginaActual, Math.max(1, totalPaginas));
   const ventasPaginadas = ventasFiltradas.slice((pagina - 1) * VENTAS_POR_PAGINA, pagina * VENTAS_POR_PAGINA);
 
+  // Total vendido por mes (ultimos 12 meses con ventas). No se guarda la cotizacion de cada
+  // venta, asi que los pesos se calculan con la cotizacion actual.
+  const resumenMensual = mesesDisponibles.slice(0, 12).map((mes) => {
+    const ventasMes = ventasGlobales.filter((v) => obtenerMesAnio(v.fecha_venta) === mes);
+    const totalUsd = ventasMes.reduce((acc, v) => acc + (Number(v.precio_usd) || 0), 0);
+    return { mes, unidades: ventasMes.length, totalUsd, totalArs: totalUsd * cot };
+  });
+
   const datosGrafico = mesesDisponibles
     .slice(0, 6)
     .reverse()
@@ -969,9 +978,9 @@ function Admin() {
                   <input required name="capacidad" value={formCelular.capacidad} onChange={handleChangeCelular} type="text" placeholder="Cap. (Ej: 128)" className={claseInput} />
                   <input required name="color" list="lista-colores" value={formCelular.color} onChange={handleChangeCelular} type="text" placeholder="Color" className={claseInput} />
                   <input required name="bateria" value={formCelular.bateria} onChange={handleChangeCelular} type="number" min="0" max="100" placeholder="Bateria %" className={claseInput} />
-                  <input required name="costo_usd" value={formCelular.costo_usd} onChange={handleChangeCelular} type="number" min="0" step="0.01" placeholder="Costo (USD)" className={claseInput} />
+                  <input required name="costo_usd" value={formCelular.costo_usd} onChange={handleChangeCelular} type="number" min="0" step="any" placeholder="Costo (USD)" className={claseInput} />
                   <div className="flex flex-col min-w-0">
-                    <input required name="precio_usd" value={formCelular.precio_usd} onChange={handleChangeCelular} type="number" min="0" step="0.01" placeholder="Venta (USD)" className={claseInput} />
+                    <input required name="precio_usd" value={formCelular.precio_usd} onChange={handleChangeCelular} type="number" min="0" step="any" placeholder="Venta (USD)" className={claseInput} />
                     <span className="text-[10px] text-green-600 font-bold mt-1 ml-1 h-3">
                       {formCelular.precio_usd ? 'ARS $ ' + fmt(formCelular.precio_usd * cot) : ''}
                     </span>
@@ -1013,10 +1022,10 @@ function Admin() {
                           <input className={claseInputEdicion} name="color" type="text" list="lista-colores" value={formEdicionCelular.color || ''} onChange={handleChangeEdicionCelular} placeholder="Elegir o escribir" />
                         </Campo>
                         <Campo etiqueta="Costo USD">
-                          <input className={claseInputEdicion} name="costo_usd" type="number" min="0" step="0.01" value={formEdicionCelular.costo_usd ?? ''} onChange={handleChangeEdicionCelular} />
+                          <input className={claseInputEdicion} name="costo_usd" type="number" min="0" step="any" value={formEdicionCelular.costo_usd ?? ''} onChange={handleChangeEdicionCelular} />
                         </Campo>
                         <Campo etiqueta="Venta USD">
-                          <input className={claseInputEdicion} name="precio_usd" type="number" min="0" step="0.01" value={formEdicionCelular.precio_usd ?? ''} onChange={handleChangeEdicionCelular} />
+                          <input className={claseInputEdicion} name="precio_usd" type="number" min="0" step="any" value={formEdicionCelular.precio_usd ?? ''} onChange={handleChangeEdicionCelular} />
                         </Campo>
                         <Campo etiqueta="Detalles" className="col-span-2">
                           <input className={claseInputEdicion} name="detalles" value={formEdicionCelular.detalles || ''} onChange={handleChangeEdicionCelular} />
@@ -1061,9 +1070,9 @@ function Admin() {
                   <input required name="tipo" value={formAccesorio.tipo} onChange={handleChangeAccesorio} type="text" placeholder="Tipo (Ej: Funda)" className={claseInput} />
                   <input required name="modelo" value={formAccesorio.modelo} onChange={handleChangeAccesorio} type="text" placeholder="Mod. (Ej: iPhone 13)" className={claseInput} />
                   <input required name="color" list="lista-colores" value={formAccesorio.color} onChange={handleChangeAccesorio} type="text" placeholder="Color / Diseno" className={claseInput} />
-                  <input required name="costo_usd" value={formAccesorio.costo_usd} onChange={handleChangeAccesorio} type="number" min="0" step="0.01" placeholder="Costo (USD)" className={claseInput} />
+                  <input required name="costo_usd" value={formAccesorio.costo_usd} onChange={handleChangeAccesorio} type="number" min="0" step="any" placeholder="Costo (USD)" className={claseInput} />
                   <div className="flex flex-col min-w-0">
-                    <input required name="precio_usd" value={formAccesorio.precio_usd} onChange={handleChangeAccesorio} type="number" min="0" step="0.01" placeholder="Venta (USD)" className={claseInput} />
+                    <input required name="precio_usd" value={formAccesorio.precio_usd} onChange={handleChangeAccesorio} type="number" min="0" step="any" placeholder="Venta (USD)" className={claseInput} />
                     <span className="text-[10px] text-green-600 font-bold mt-1 ml-1 h-3">
                       {formAccesorio.precio_usd ? 'ARS $ ' + fmt(formAccesorio.precio_usd * cot) : ''}
                     </span>
@@ -1102,10 +1111,10 @@ function Admin() {
                           <input className={claseInputEdicion} name="color" type="text" list="lista-colores" value={formEdicionAccesorio.color || ''} onChange={handleChangeEdicionAccesorio} placeholder="Elegir o escribir" />
                         </Campo>
                         <Campo etiqueta="Costo USD">
-                          <input className={claseInputEdicion} name="costo_usd" type="number" min="0" step="0.01" value={formEdicionAccesorio.costo_usd ?? ''} onChange={handleChangeEdicionAccesorio} />
+                          <input className={claseInputEdicion} name="costo_usd" type="number" min="0" step="any" value={formEdicionAccesorio.costo_usd ?? ''} onChange={handleChangeEdicionAccesorio} />
                         </Campo>
                         <Campo etiqueta="Venta USD">
-                          <input className={claseInputEdicion} name="precio_usd" type="number" min="0" step="0.01" value={formEdicionAccesorio.precio_usd ?? ''} onChange={handleChangeEdicionAccesorio} />
+                          <input className={claseInputEdicion} name="precio_usd" type="number" min="0" step="any" value={formEdicionAccesorio.precio_usd ?? ''} onChange={handleChangeEdicionAccesorio} />
                         </Campo>
                         <Campo etiqueta="Detalles">
                           <input className={claseInputEdicion} name="detalles" value={formEdicionAccesorio.detalles || ''} onChange={handleChangeEdicionAccesorio} />
@@ -1182,6 +1191,32 @@ function Admin() {
               <p className="text-xl md:text-3xl font-black mt-1 text-emerald-600 break-words">$ {fmt(gananciaVentasARS)}</p>
             </div>
           </div>
+
+          {resumenMensual.length > 0 && (
+            <div>
+              <h3 className="text-xs md:text-sm font-bold text-gray-500 mb-2 uppercase tracking-wider">Total vendido por mes</h3>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                {resumenMensual.map((r) => (
+                  <button
+                    key={r.mes}
+                    type="button"
+                    onClick={() => { setMesSeleccionado(mesSeleccionado === r.mes ? 'todos' : r.mes); setPaginaActual(1); }}
+                    className={
+                      'min-w-0 text-left bg-white p-3 md:p-4 rounded-2xl shadow-sm border transition ' +
+                      (mesSeleccionado === r.mes ? 'border-blue-500 ring-2 ring-blue-100' : 'border-gray-200 hover:border-gray-300')
+                    }
+                  >
+                    <span className="block text-[11px] md:text-xs font-bold text-gray-500 uppercase tracking-wide">{formatearNombreMes(r.mes)}</span>
+                    <span className="block text-base md:text-xl font-black text-gray-900 mt-1 break-words">ARS $ {fmt(Math.round(r.totalArs))}</span>
+                    <span className="block text-[11px] font-semibold text-gray-500 mt-0.5">USD {fmt(r.totalUsd)} - {r.unidades} venta(s)</span>
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] text-gray-400 mt-2">
+                Pesos calculados con la cotizacion actual. Toca un mes para filtrar el historial.
+              </p>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {datosGrafico.length > 0 && (
