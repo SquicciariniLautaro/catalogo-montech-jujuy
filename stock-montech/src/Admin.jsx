@@ -558,7 +558,7 @@ function Admin() {
   const [mesSeleccionado, setMesSeleccionado] = useState('todos');
   const [paginaActual, setPaginaActual] = useState(1);
   const [menu, setMenu] = useState(null); // { key, item, tabla, top, right }
-  const [venta, setVenta] = useState(null); // { item, tabla, cantidad, mayorista, precio (ARS por unidad, celulares), accesorios (ids de lote) }
+  const [venta, setVenta] = useState(null); // { item, tabla, cantidad, mayorista, precio (ARS por unidad, celulares), accesorios: [{ id, cantidad, modo, precio }] }
   const [busquedaStock, setBusquedaStock] = useState('');
   // En pantallas chicas el formulario de ingreso y las familias del stock arrancan cerrados
   const [esEscritorio] = useState(() => window.matchMedia('(min-width: 768px)').matches);
@@ -841,20 +841,46 @@ function Admin() {
     ? redondear(!precioManualValido ? 0 : precioSinCambios ? venta.item.precio_usd : precioManualArs / cot)
     : redondear(venta.item.precio_usd * (mayoristaActivo ? 1 - Number(descuentoMayorista) / 100 : 1));
 
-  // Accesorios vendidos junto al celular: cada vez que se elige uno se suma una unidad de ese lote
+  // Accesorios vendidos junto al celular. Cada uno puede ir a precio de lista, a un precio
+  // especial (en pesos por unidad) o gratis.
   const accesoriosVenta = venta
-    ? stockAccesorios
-        .map((lote) => ({ lote, cantidad: (venta.accesorios || []).filter((id) => id === String(lote.ids[0])).length }))
-        .filter((a) => a.cantidad > 0)
+    ? (venta.accesorios || [])
+        .map((a) => {
+          const lote = stockAccesorios.find((l) => String(l.ids[0]) === a.id);
+          if (!lote) return null;
+          const cantidad = Math.min(lote.cantidad, Math.max(1, parseInt(a.cantidad) || 1));
+          const precioArs = parseFloat(a.precio);
+          const precioUsd =
+            a.modo === 'gratis'
+              ? 0
+              : a.modo === 'especial'
+              ? precioArs >= 0 && cot > 0 ? redondear(precioArs / cot) : NaN
+              : lote.precio_usd;
+          return { ...a, lote, cantidad, precioUsd };
+        })
+        .filter(Boolean)
     : [];
-  const totalAccesoriosUsd = accesoriosVenta.reduce((acc, a) => acc + a.lote.precio_usd * a.cantidad, 0);
+  const accesoriosValidos = accesoriosVenta.every((a) => a.precioUsd >= 0);
+  const totalAccesoriosUsd = accesoriosVenta.reduce((acc, a) => acc + (a.precioUsd || 0) * a.cantidad, 0);
   const totalOperacionArs = Math.round((precioVenta * cantidadVenta + totalAccesoriosUsd) * cot);
 
-  const quitarAccesorioVenta = (id) => {
-    const lista = [...venta.accesorios];
-    lista.splice(lista.lastIndexOf(id), 1);
-    setVenta({ ...venta, accesorios: lista });
+  const agregarAccesorioVenta = (id) => {
+    if (!id) return;
+    const existente = venta.accesorios.find((a) => a.id === id);
+    if (existente) {
+      cambiarAccesorioVenta(id, { cantidad: (parseInt(existente.cantidad) || 1) + 1 });
+      return;
+    }
+    const lote = stockAccesorios.find((l) => String(l.ids[0]) === id);
+    setVenta({
+      ...venta,
+      accesorios: [...venta.accesorios, { id, cantidad: 1, modo: 'lista', precio: Math.round(lote.precio_usd * cot) }],
+    });
   };
+  const cambiarAccesorioVenta = (id, cambios) =>
+    setVenta({ ...venta, accesorios: venta.accesorios.map((a) => (a.id === id ? { ...a, ...cambios } : a)) });
+  const quitarAccesorioVenta = (id) =>
+    setVenta({ ...venta, accesorios: venta.accesorios.filter((a) => a.id !== id) });
 
   // La venta se registra al precio final cargado (celulares) o al del lote, con descuento
   // mayorista si corresponde (accesorios). Los accesorios elegidos salen del stock a su precio.
@@ -862,6 +888,10 @@ function Admin() {
     const { item, tabla } = venta;
     if (tabla === 'celulares' && !precioManualValido) {
       toast.error('Indica el precio final de venta');
+      return;
+    }
+    if (!accesoriosValidos) {
+      toast.error('Indica el precio especial de los accesorios');
       return;
     }
     const ids = item.ids.slice(0, cantidadVenta);
@@ -878,10 +908,10 @@ function Admin() {
     }
 
     let unidadesAccesorios = 0;
-    for (const { lote, cantidad } of accesorios) {
+    for (const { lote, cantidad, precioUsd } of accesorios) {
       const { error: errorAccesorio } = await supabase
         .from('accesorios')
-        .update({ estado: 'vendido', fecha_venta: fecha, precio_usd: lote.precio_usd })
+        .update({ estado: 'vendido', fecha_venta: fecha, precio_usd: precioUsd })
         .in('id', lote.ids.slice(0, cantidad));
       if (errorAccesorio) {
         toast.error('El celular se vendio, pero no se pudo descontar ' + lote.tipo + ' ' + lote.modelo + ': ' + errorAccesorio.message);
@@ -2190,42 +2220,95 @@ function Admin() {
                 </label>
                 <select
                   value=""
-                  onChange={(e) => setVenta({ ...venta, accesorios: [...venta.accesorios, e.target.value] })}
+                  onChange={(e) => agregarAccesorioVenta(e.target.value)}
                   className={claseInputModal + ' text-gray-700'}
                 >
                   <option value="">{stockAccesorios.length === 0 ? 'No hay accesorios en stock' : 'Agregar un accesorio...'}</option>
                   {stockAccesorios.map((lote) => {
-                    const elegidos = venta.accesorios.filter((id) => id === String(lote.ids[0])).length;
+                    const elegido = accesoriosVenta.find((x) => x.lote === lote);
+                    const restantes = lote.cantidad - (elegido ? elegido.cantidad : 0);
                     return (
-                      <option key={lote.ids[0]} value={lote.ids[0]} disabled={elegidos >= lote.cantidad}>
-                        {lote.tipo} {lote.modelo} {lote.color} - ARS $ {fmt(Math.round(lote.precio_usd * cot))} ({lote.cantidad - elegidos} u.)
+                      <option key={lote.ids[0]} value={lote.ids[0]} disabled={restantes <= 0}>
+                        {lote.tipo} {lote.modelo} {lote.color} - ARS $ {fmt(Math.round(lote.precio_usd * cot))} ({restantes} u.)
                       </option>
                     );
                   })}
                 </select>
                 {accesoriosVenta.length > 0 && (
-                  <ul className="mt-2 space-y-1.5">
-                    {accesoriosVenta.map(({ lote, cantidad }) => (
-                      <li key={lote.ids[0]} className="flex items-center justify-between gap-2 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
-                        <span className="min-w-0 text-xs font-bold text-gray-800 break-words">
-                          {cantidad} x {lote.tipo} {lote.modelo}
-                          <span className="block text-[11px] font-semibold text-gray-500">
-                            ARS $ {fmt(Math.round(lote.precio_usd * cot * cantidad))}
+                  <ul className="mt-2 space-y-2">
+                    {accesoriosVenta.map((x) => (
+                      <li key={x.id} className="bg-gray-50 border border-gray-200 rounded-lg p-2.5">
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="min-w-0 text-xs font-bold text-gray-800 break-words">
+                            {x.lote.tipo} {x.lote.modelo}
+                            <span className="block text-[11px] font-semibold text-gray-500">
+                              Lista: ARS $ {fmt(Math.round(x.lote.precio_usd * cot))} c/u
+                            </span>
                           </span>
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => quitarAccesorioVenta(String(lote.ids[0]))}
-                          className="shrink-0 text-xs font-bold text-red-500 hover:underline py-1 px-1"
-                        >
-                          Quitar
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => quitarAccesorioVenta(x.id)}
+                            className="shrink-0 text-xs font-bold text-red-500 hover:underline px-1"
+                          >
+                            Quitar
+                          </button>
+                        </div>
+                        <div className="mt-2 flex items-stretch gap-2">
+                          <div className="shrink-0 inline-flex items-center border border-gray-300 rounded-lg overflow-hidden bg-white">
+                            <button
+                              type="button"
+                              aria-label="Restar una unidad"
+                              disabled={x.cantidad <= 1}
+                              onClick={() => cambiarAccesorioVenta(x.id, { cantidad: x.cantidad - 1 })}
+                              className="w-8 h-9 font-black text-gray-700 hover:bg-gray-100 disabled:opacity-30"
+                            >
+                              -
+                            </button>
+                            <span className="min-w-7 px-1 text-center text-sm font-bold text-gray-800">{x.cantidad}</span>
+                            <button
+                              type="button"
+                              aria-label="Sumar una unidad"
+                              disabled={x.cantidad >= x.lote.cantidad}
+                              onClick={() => cambiarAccesorioVenta(x.id, { cantidad: x.cantidad + 1 })}
+                              className="w-8 h-9 font-black text-gray-700 hover:bg-gray-100 disabled:opacity-30"
+                            >
+                              +
+                            </button>
+                          </div>
+                          <select
+                            value={x.modo}
+                            onChange={(e) => cambiarAccesorioVenta(x.id, { modo: e.target.value })}
+                            aria-label="Precio del accesorio"
+                            className="flex-1 min-w-0 border border-gray-300 rounded-lg px-2 bg-white text-sm font-semibold text-gray-800 outline-none"
+                          >
+                            <option value="lista">Precio de lista</option>
+                            <option value="especial">Precio especial</option>
+                            <option value="gratis">Gratis (regalo)</option>
+                          </select>
+                        </div>
+                        {x.modo === 'especial' && (
+                          <input
+                            type="number"
+                            min="0"
+                            step="any"
+                            value={x.precio}
+                            onChange={(e) => cambiarAccesorioVenta(x.id, { precio: e.target.value })}
+                            placeholder="Precio especial en pesos por unidad"
+                            aria-label="Precio especial en pesos por unidad"
+                            className="mt-2 border border-gray-300 rounded-lg p-2 w-full min-w-0 bg-white text-sm font-bold text-gray-800 outline-none focus:border-blue-500"
+                          />
+                        )}
+                        <p className="mt-1.5 text-right text-xs font-bold text-gray-700">
+                          {x.modo === 'gratis'
+                            ? 'Gratis'
+                            : 'ARS $ ' + fmt(Math.round((x.precioUsd || 0) * cot * x.cantidad)) + (x.modo === 'especial' ? ' (precio especial)' : '')}
+                        </p>
                       </li>
                     ))}
                   </ul>
                 )}
                 <p className="text-[11px] font-medium text-gray-500 mt-1">
-                  Al confirmar, cada accesorio elegido se descuenta del stock y queda como vendido a su precio.
+                  Al confirmar, cada accesorio elegido se descuenta del stock y queda como vendido al precio indicado (los regalos, a $ 0).
                 </p>
               </Fragment>
             )}
