@@ -377,6 +377,16 @@ function InputPesos({ value, onChange, ...props }) {
   );
 }
 
+// Equivalente en pesos de un monto en USD, para mostrar debajo del campo mientras se escribe
+function PesosDe({ usd, cot }) {
+  const monto = parseFloat(usd);
+  return (
+    <span className="block h-3 mt-1 ml-1 text-[10px] font-bold text-green-600 normal-case tracking-normal">
+      {monto >= 0 ? 'ARS $ ' + fmt(Math.round(monto * cot)) : ''}
+    </span>
+  );
+}
+
 // Campo con etiqueta para los formularios de edicion
 function Campo({ etiqueta, className = '', children }) {
   return (
@@ -1474,7 +1484,10 @@ function Admin() {
                   <input required name="capacidad" value={formCelular.capacidad} onChange={handleChangeCelular} type="text" placeholder="Cap. (Ej: 128)" className={claseInput} />
                   <input required name="color" list="lista-colores" value={formCelular.color} onChange={handleChangeCelular} type="text" placeholder="Color" className={claseInput} />
                   <input required name="bateria" value={formCelular.bateria} onChange={handleChangeCelular} type="number" min="0" max="100" placeholder="Bateria %" className={claseInput} />
-                  <input required name="costo_usd" value={formCelular.costo_usd} onChange={handleChangeCelular} type="number" min="0" step="any" placeholder="Costo (USD)" className={claseInput} />
+                  <div className="flex flex-col min-w-0">
+                    <input required name="costo_usd" value={formCelular.costo_usd} onChange={handleChangeCelular} type="number" min="0" step="any" placeholder="Costo (USD)" className={claseInput} />
+                    <PesosDe usd={formCelular.costo_usd} cot={cot} />
+                  </div>
                   <div className="flex flex-col min-w-0">
                     <input required name="precio_usd" value={formCelular.precio_usd} onChange={handleChangeCelular} type="number" min="0" step="any" placeholder="Venta (USD)" className={claseInput} />
                     <span className="text-[10px] text-green-600 font-bold mt-1 ml-1 h-3">
@@ -1528,9 +1541,11 @@ function Admin() {
                         </Campo>
                         <Campo etiqueta="Costo USD">
                           <input className={claseInputEdicion} name="costo_usd" type="number" min="0" step="any" value={formEdicionCelular.costo_usd ?? ''} onChange={handleChangeEdicionCelular} />
+                          <PesosDe usd={formEdicionCelular.costo_usd} cot={cot} />
                         </Campo>
                         <Campo etiqueta="Venta USD">
                           <input className={claseInputEdicion} name="precio_usd" type="number" min="0" step="any" value={formEdicionCelular.precio_usd ?? ''} onChange={handleChangeEdicionCelular} />
+                          <PesosDe usd={formEdicionCelular.precio_usd} cot={cot} />
                         </Campo>
                         <Campo etiqueta="Detalles" className="col-span-2">
                           <input className={claseInputEdicion} name="detalles" value={formEdicionCelular.detalles || ''} onChange={handleChangeEdicionCelular} />
@@ -1595,7 +1610,10 @@ function Admin() {
                   <input required name="tipo" value={formAccesorio.tipo} onChange={handleChangeAccesorio} type="text" placeholder="Tipo (Ej: Funda)" className={claseInput} />
                   <input required name="modelo" value={formAccesorio.modelo} onChange={handleChangeAccesorio} type="text" placeholder="Mod. (Ej: iPhone 13)" className={claseInput} />
                   <input required name="color" list="lista-colores" value={formAccesorio.color} onChange={handleChangeAccesorio} type="text" placeholder="Color / Diseno" className={claseInput} />
-                  <input required name="costo_usd" value={formAccesorio.costo_usd} onChange={handleChangeAccesorio} type="number" min="0" step="any" placeholder="Costo (USD)" className={claseInput} />
+                  <div className="flex flex-col min-w-0">
+                    <input required name="costo_usd" value={formAccesorio.costo_usd} onChange={handleChangeAccesorio} type="number" min="0" step="any" placeholder="Costo (USD)" className={claseInput} />
+                    <PesosDe usd={formAccesorio.costo_usd} cot={cot} />
+                  </div>
                   <div className="flex flex-col min-w-0">
                     <input required name="precio_usd" value={formAccesorio.precio_usd} onChange={handleChangeAccesorio} type="number" min="0" step="any" placeholder="Venta (USD)" className={claseInput} />
                     <span className="text-[10px] text-green-600 font-bold mt-1 ml-1 h-3">
@@ -1646,9 +1664,11 @@ function Admin() {
                         </Campo>
                         <Campo etiqueta="Costo USD">
                           <input className={claseInputEdicion} name="costo_usd" type="number" min="0" step="any" value={formEdicionAccesorio.costo_usd ?? ''} onChange={handleChangeEdicionAccesorio} />
+                          <PesosDe usd={formEdicionAccesorio.costo_usd} cot={cot} />
                         </Campo>
                         <Campo etiqueta="Venta USD">
                           <input className={claseInputEdicion} name="precio_usd" type="number" min="0" step="any" value={formEdicionAccesorio.precio_usd ?? ''} onChange={handleChangeEdicionAccesorio} />
+                          <PesosDe usd={formEdicionAccesorio.precio_usd} cot={cot} />
                         </Campo>
                         <Campo etiqueta="Detalles">
                           <input className={claseInputEdicion} name="detalles" value={formEdicionAccesorio.detalles || ''} onChange={handleChangeEdicionAccesorio} />
