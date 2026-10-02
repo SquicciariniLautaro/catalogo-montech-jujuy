@@ -92,19 +92,36 @@ const capacidadANumero = (cap) => {
 
 const comparar = (a, b) => String(a || '').localeCompare(String(b || ''), 'es', { numeric: true, sensitivity: 'base' });
 
-// Mismo orden que el catalogo publico: modelo, capacidad, color, precio
+// Desempate entre celulares del mismo precio: modelo, capacidad, color
 const compararCelulares = (a, b) =>
   comparar(a.modelo, b.modelo) ||
   capacidadANumero(a.capacidad) - capacidadANumero(b.capacidad) ||
   comparar(a.color, b.color) ||
   (Number(a.precio_usd) || 0) - (Number(b.precio_usd) || 0);
 
-// Mismo orden que el catalogo publico: tipo, modelo, color, precio
+// Desempate entre accesorios del mismo precio: tipo, modelo, color
 const compararAccesorios = (a, b) =>
   comparar(a.tipo, b.tipo) ||
   comparar(a.modelo, b.modelo) ||
   comparar(a.color, b.color) ||
   (Number(a.precio_usd) || 0) - (Number(b.precio_usd) || 0);
+
+// Ordena de menor a mayor precio sin romper los grupos por familia: las familias van segun
+// su producto mas barato y, dentro de cada familia, los productos de menor a mayor precio
+const ordenarPorPrecio = (lista, obtenerFamilia, desempate) => {
+  const precio = (item) => Number(item.precio_usd) || 0;
+  const minimos = {};
+  lista.forEach((item) => {
+    const familia = normalizar(obtenerFamilia(item));
+    if (!(familia in minimos) || precio(item) < minimos[familia]) minimos[familia] = precio(item);
+  });
+  return [...lista].sort((a, b) => {
+    const fa = normalizar(obtenerFamilia(a));
+    const fb = normalizar(obtenerFamilia(b));
+    if (fa !== fb) return minimos[fa] - minimos[fb] || comparar(fa, fb);
+    return precio(a) - precio(b) || desempate(a, b);
+  });
+};
 
 // La clave de lote NO incluye costo ni precio: ambos se promedian
 const claveCelular = (c) =>
@@ -126,7 +143,7 @@ const claveAccesorio = (a) =>
 
 // Agrupa las unidades iguales en una sola fila y las ordena. Cada registro de la BD es una
 // unidad, por lo que total / cantidad es el promedio ponderado de costo y de precio del lote.
-const agruparStock = (filas, claveFn, compararFn) => {
+const agruparStock = (filas, claveFn, ordenar) => {
   const grupos = filas.reduce((acc, f) => {
     const k = claveFn(f);
     if (!acc[k]) acc[k] = { ...f, cantidad: 0, ids: [], costoTotal: 0, precioTotal: 0 };
@@ -136,13 +153,13 @@ const agruparStock = (filas, claveFn, compararFn) => {
     acc[k].precioTotal += Number(f.precio_usd) || 0;
     return acc;
   }, {});
-  return Object.values(grupos)
-    .map((g) => ({
+  return ordenar(
+    Object.values(grupos).map((g) => ({
       ...g,
       costo_usd: redondear(g.costoTotal / g.cantidad),
       precio_usd: redondear(g.precioTotal / g.cantidad),
     }))
-    .sort(compararFn);
+  );
 };
 
 const TAMANO_PAGINA = 1000;
@@ -470,8 +487,7 @@ function Admin() {
   async function cargarDatos(mostrarLoader = false) {
     if (mostrarLoader) setCargando(true);
 
-    // El stock se pide ordenado por modelo ascendente y luego se termina de ordenar
-    // con el mismo criterio del catalogo publico (modelo, capacidad, color, precio)
+    // El orden final (de menor a mayor precio, igual que el catalogo publico) se aplica al agrupar
     const [config, celDisponibles, accDisponibles, celVendidos, accVendidos] = await Promise.all([
       supabase.from('configuracion').select('*').eq('id', 1).single(),
       traerTodo(() => supabase.from('celulares').select('*').eq('estado', 'disponible').order('modelo', { ascending: true }).order('id')),
@@ -489,8 +505,8 @@ function Admin() {
         setDescuentoMayorista(config.data.descuento_mayorista);
       }
     }
-    if (celDisponibles.data) setStockCelulares(agruparStock(celDisponibles.data, claveCelular, compararCelulares));
-    if (accDisponibles.data) setStockAccesorios(agruparStock(accDisponibles.data, claveAccesorio, compararAccesorios));
+    if (celDisponibles.data) setStockCelulares(agruparStock(celDisponibles.data, claveCelular, (l) => ordenarPorPrecio(l, (c) => c.modelo, compararCelulares)));
+    if (accDisponibles.data) setStockAccesorios(agruparStock(accDisponibles.data, claveAccesorio, (l) => ordenarPorPrecio(l, (x) => x.tipo, compararAccesorios)));
 
     const ventasUnificadas = [
       ...(celVendidos.data || []).map((v) => ({ ...v, categoria: 'celular' })),
@@ -664,8 +680,11 @@ function Admin() {
 
   // Cantidad a vender, siempre entre 1 y las unidades del lote
   const cantidadVenta = venta ? Math.min(venta.item.cantidad, Math.max(1, parseInt(venta.cantidad) || 1)) : 0;
+  // El descuento mayorista solo aplica a accesorios vendidos por cantidad (2 o mas unidades)
+  const admiteMayorista = venta ? venta.tabla === 'accesorios' : false;
+  const mayoristaActivo = admiteMayorista && venta.mayorista && cantidadVenta >= 2;
   const precioVenta = venta
-    ? redondear(venta.item.precio_usd * (venta.mayorista ? 1 - Number(descuentoMayorista) / 100 : 1))
+    ? redondear(venta.item.precio_usd * (mayoristaActivo ? 1 - Number(descuentoMayorista) / 100 : 1))
     : 0;
 
   // La venta se registra al precio que muestra el lote (promedio), con descuento si es mayorista
@@ -898,7 +917,7 @@ function Admin() {
             </button>
           </div>
         </div>
-        <div className="grid grid-cols-2 md:flex gap-2 md:gap-3 md:items-center">
+        <div className="grid grid-cols-2 md:flex gap-2 md:gap-3 items-start">
           <label className="flex items-center min-w-0 bg-white p-1.5 rounded-xl shadow-sm border border-gray-200">
             <span className="font-semibold px-2 text-green-600 text-[11px] md:text-xs uppercase">Cotizacion $</span>
             <input
@@ -909,8 +928,9 @@ function Admin() {
               className="flex-1 min-w-0 md:flex-none md:w-20 border-l pl-2 py-1 outline-none font-bold text-base md:text-sm text-gray-700 bg-transparent"
             />
           </label>
+          <div className="min-w-0">
           <label className="flex items-center min-w-0 bg-white p-1.5 rounded-xl shadow-sm border border-gray-200">
-            <span className="font-semibold px-2 text-blue-600 text-[11px] md:text-xs uppercase">Mayorista %</span>
+            <span className="font-semibold px-2 text-blue-600 text-[11px] md:text-xs uppercase">Desc. mayorista %</span>
             <input
               type="number"
               min="0"
@@ -920,6 +940,8 @@ function Admin() {
               className="flex-1 min-w-0 md:flex-none md:w-16 border-l pl-2 py-1 outline-none font-bold text-base md:text-sm text-gray-700 bg-transparent"
             />
           </label>
+          <p className="text-[9px] text-gray-400 font-medium mt-1 ml-1 leading-tight">Se aplica al vender accesorios por cantidad</p>
+          </div>
           <button
             onClick={conBloqueo(handleActualizarConfiguracion)}
             className="col-span-2 bg-gray-900 text-white px-4 py-2.5 md:py-2 rounded-lg text-sm font-medium hover:bg-gray-800 transition"
@@ -1380,23 +1402,46 @@ function Admin() {
                 onClick={() => setVenta({ ...venta, cantidad: venta.item.cantidad })}
                 className="mt-2 text-xs font-bold text-blue-600 hover:underline py-1"
               >
-                Vender todas ({venta.item.cantidad})
+                Vender todas ({venta.item.cantidad}){admiteMayorista ? ' - podes aplicar el descuento mayorista abajo' : ''}
               </button>
             )}
 
-            <label className="mt-3 flex items-center gap-2 bg-blue-50 border border-blue-100 rounded-lg p-3 text-sm font-bold text-blue-800 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={venta.mayorista}
-                onChange={(e) => setVenta({ ...venta, mayorista: e.target.checked })}
-                className="w-4 h-4"
-              />
-              Precio mayorista (-{descuentoMayorista}%)
-            </label>
+            {admiteMayorista && (
+              <label
+                className={
+                  'mt-3 flex items-start gap-2 bg-blue-50 border border-blue-100 rounded-lg p-3 ' +
+                  (cantidadVenta >= 2 ? 'cursor-pointer' : 'opacity-60')
+                }
+              >
+                <input
+                  type="checkbox"
+                  checked={mayoristaActivo}
+                  disabled={cantidadVenta < 2}
+                  onChange={(e) => setVenta({ ...venta, mayorista: e.target.checked })}
+                  className="w-4 h-4 mt-0.5 shrink-0"
+                />
+                <span className="min-w-0">
+                  <span className="block text-sm font-bold text-blue-800">
+                    Aplicar descuento mayorista: {descuentoMayorista}% menos por unidad
+                  </span>
+                  <span className="block text-[11px] font-medium text-blue-700 mt-0.5">
+                    {cantidadVenta >= 2
+                      ? 'Es el porcentaje "Desc. mayorista" configurado arriba en el panel. Se descuenta de cada unidad de esta venta.'
+                      : 'Disponible al vender 2 o mas unidades. Usa el porcentaje "Desc. mayorista" configurado arriba en el panel.'}
+                  </span>
+                </span>
+              </label>
+            )}
 
             <div className="mt-3 bg-green-50 border border-green-100 rounded-lg p-3">
+              {mayoristaActivo && (
+                <div className="flex justify-between gap-2 text-xs font-semibold text-gray-500">
+                  <span>Precio de lista por unidad</span>
+                  <span className="line-through">USD {fmt(venta.item.precio_usd)}</span>
+                </div>
+              )}
               <div className="flex justify-between gap-2 text-xs font-semibold text-gray-600">
-                <span>Precio por unidad</span>
+                <span>{mayoristaActivo ? 'Precio mayorista por unidad (-' + descuentoMayorista + '%)' : 'Precio por unidad'}</span>
                 <span>USD {fmt(precioVenta)}</span>
               </div>
               <div className="flex justify-between gap-2 mt-1 text-base font-black text-green-700">

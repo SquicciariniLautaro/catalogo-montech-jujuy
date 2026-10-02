@@ -102,6 +102,23 @@ const compararAccesorios = (a, b) => {
   return (Number(a.precio_usd) || 0) - (Number(b.precio_usd) || 0);
 };
 
+// Ordena de menor a mayor precio sin romper los grupos por familia: las familias van segun
+// su producto mas barato y, dentro de cada familia, los productos de menor a mayor precio
+const ordenarPorPrecio = (lista, obtenerFamilia, desempate) => {
+  const precio = (item) => Number(item.precio_usd) || 0;
+  const minimos = {};
+  lista.forEach((item) => {
+    const familia = normalizar(obtenerFamilia(item));
+    if (!(familia in minimos) || precio(item) < minimos[familia]) minimos[familia] = precio(item);
+  });
+  return [...lista].sort((a, b) => {
+    const fa = normalizar(obtenerFamilia(a));
+    const fb = normalizar(obtenerFamilia(b));
+    if (fa !== fb) return minimos[fa] - minimos[fb] || comparar(fa, fb);
+    return precio(a) - precio(b) || desempate(a, b);
+  });
+};
+
 // Arma la lista de filas insertando un renglon separador cada vez que cambia la familia
 // (por ejemplo de "13" a "13 PRO"). Cuando cambia la capacidad dentro de la misma familia
 // se marca la fila con una division mas fina.
@@ -168,7 +185,7 @@ function Catalogo() {
         );
 
         if (celularesData) {
-          setCelularesAgrupados(agruparCatalogo(celularesData, claveCelular).sort(compararCelulares));
+          setCelularesAgrupados(ordenarPorPrecio(agruparCatalogo(celularesData, claveCelular), (x) => x.modelo, compararCelulares));
         }
 
         const { data: accesoriosData, error: errorAccesorios } = await traerTodo(() =>
@@ -177,7 +194,7 @@ function Catalogo() {
         if (errorCelulares || errorAccesorios) setHuboError(true);
 
         if (accesoriosData) {
-          setAccesoriosAgrupados(agruparCatalogo(accesoriosData, claveAccesorio).sort(compararAccesorios));
+          setAccesoriosAgrupados(ordenarPorPrecio(agruparCatalogo(accesoriosData, claveAccesorio), (x) => x.tipo, compararAccesorios));
         }
       } catch (error) {
         console.error(error.message);
