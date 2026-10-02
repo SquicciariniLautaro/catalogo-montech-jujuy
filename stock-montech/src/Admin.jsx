@@ -41,7 +41,7 @@ const VENTAS_POR_PAGINA = 10;
 
 // Colores del grafico por mes: paleta categorica en orden fijo
 const COLORES_GRAFICO = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300'];
-const ALTO_MENU = 190;
+const ALTO_MENU = 240;
 
 // Columnas compartidas por el encabezado y las filas del stock en escritorio
 const COLUMNAS_STOCK = 'md:grid md:grid-cols-[minmax(0,1fr)_17rem_8rem] md:gap-4 md:items-center';
@@ -110,9 +110,19 @@ const compararAccesorios = (a, b) =>
   comparar(a.color, b.color) ||
   (Number(a.precio_usd) || 0) - (Number(b.precio_usd) || 0);
 
+// Marca de un celular segun su modelo. Los iPhone se cargan sin marca ("13 PRO", "iPhone 13")
+// y devuelven ''; el resto lleva la marca como primera palabra ("Samsung A55" -> "SAMSUNG").
+const marcaDeModelo = (modelo) => {
+  const texto = normalizar(modelo);
+  if (texto === '' || /^\d/.test(texto) || texto.startsWith('IPHONE')) return '';
+  return texto.split(' ')[0];
+};
+
 // Ordena de menor a mayor precio sin romper los grupos por familia: las familias van segun
 // su producto mas barato y, dentro de cada familia, los productos de menor a mayor precio
-const ordenarPorPrecio = (lista, obtenerFamilia, desempate) => {
+//
+// Con varias marcas, primero van los iPhone y despues cada marca junta, en orden alfabetico.
+const ordenarPorPrecio = (lista, obtenerFamilia, desempate, obtenerMarca = () => '') => {
   const precio = (item) => Number(item.precio_usd) || 0;
   const minimos = {};
   lista.forEach((item) => {
@@ -120,6 +130,9 @@ const ordenarPorPrecio = (lista, obtenerFamilia, desempate) => {
     if (!(familia in minimos) || precio(item) < minimos[familia]) minimos[familia] = precio(item);
   });
   return [...lista].sort((a, b) => {
+    const ma = obtenerMarca(a);
+    const mb = obtenerMarca(b);
+    if (ma !== mb) return ma === '' ? -1 : mb === '' ? 1 : comparar(ma, mb);
     const fa = normalizar(obtenerFamilia(a));
     const fb = normalizar(obtenerFamilia(b));
     if (fa !== fb) return minimos[fa] - minimos[fb] || comparar(fa, fb);
@@ -150,9 +163,10 @@ const claveAccesorio = (a) =>
 const agruparStock = (filas, claveFn, ordenar) => {
   const grupos = filas.reduce((acc, f) => {
     const k = claveFn(f);
-    if (!acc[k]) acc[k] = { ...f, cantidad: 0, ids: [], costoTotal: 0, precioTotal: 0 };
+    if (!acc[k]) acc[k] = { ...f, cantidad: 0, ids: [], costoTotal: 0, precioTotal: 0, promediado: false };
     acc[k].cantidad += 1;
     acc[k].ids.push(f.id);
+    if (f.promediado) acc[k].promediado = true;
     acc[k].costoTotal += Number(f.costo_usd) || 0;
     acc[k].precioTotal += Number(f.precio_usd) || 0;
     return acc;
@@ -179,6 +193,17 @@ async function traerTodo(armarConsulta) {
   }
 }
 
+// Los ids viajan en la direccion de la consulta: con lotes grandes (cientos de unidades) hay
+// que mandarlos por tandas para no superar el largo maximo
+const TAMANO_TANDA = 150;
+async function porTandas(ids, operacion) {
+  for (let desde = 0; desde < ids.length; desde += TAMANO_TANDA) {
+    const resultado = await operacion(ids.slice(desde, desde + TAMANO_TANDA));
+    if (resultado.error) return resultado;
+  }
+  return { error: null };
+}
+
 // Inserta unidades nuevas y unifica costo y precio del lote con el promedio ponderado
 async function guardarLoteConPromedio(tabla, filaBase, cantidad, claveFn) {
   const { data: existentes, error: errorBusqueda } = await traerTodo(() =>
@@ -201,18 +226,30 @@ async function guardarLoteConPromedio(tabla, filaBase, cantidad, claveFn) {
     estado: 'disponible',
   }));
 
-  const { error } = await supabase.from(tabla).insert(nuevos);
+  // El lote queda marcado como promediado si se juntaron unidades con distinto costo o precio
+  const mezcla = mismos.some(
+    (e) => Number(e.costo_usd) !== Number(filaBase.costo_usd) || Number(e.precio_usd) !== Number(filaBase.precio_usd)
+  );
+  const promediado = mezcla || mismos.some((e) => e.promediado === true);
+
+  const { data: insertados, error } = await supabase.from(tabla).insert(nuevos).select('id');
   if (error) return { error };
 
   const idsDesactualizados = mismos
     .filter((e) => Number(e.costo_usd) !== costo || Number(e.precio_usd) !== precio)
     .map((e) => e.id);
   if (idsDesactualizados.length > 0) {
-    const { error: errorUpdate } = await supabase
+    const { error: errorUpdate } = await porTandas(idsDesactualizados, (tanda) => supabase
       .from(tabla)
       .update({ costo_usd: costo, precio_usd: precio })
-      .in('id', idsDesactualizados);
+      .in('id', tanda));
     if (errorUpdate) return { error: errorUpdate };
+  }
+
+  // La marca vive en una columna opcional: si la base todavia no la tiene, se ignora el error
+  if (promediado) {
+    const idsLote = [...mismos.map((e) => e.id), ...(insertados || []).map((n) => n.id)];
+    await porTandas(idsLote, (tanda) => supabase.from(tabla).update({ promediado: true }).in('id', tanda));
   }
 
   return { error: null, costo, precio, unificadas: mismos.length };
@@ -489,7 +526,10 @@ function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
             {[item.color, ...subtitulo].filter(Boolean).join(' - ')}
           </span>
         </span>
-        <span className="shrink-0 text-sm font-bold text-gray-800">$ {fmt(Math.round(item.precio_usd * cot))}</span>
+        <span className="shrink-0 text-right">
+          <span className="block text-sm font-bold text-gray-800">$ {fmt(Math.round(item.precio_usd * cot))}</span>
+          {item.promediado && <span className="block text-[9px] font-bold text-blue-500 uppercase tracking-wide">Promediado</span>}
+        </span>
         <IconoFlecha abierto={abierto} />
       </button>
 
@@ -517,6 +557,14 @@ function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
           <DatoStock etiqueta="Costo USD" valor={'$ ' + fmt(item.costo_usd)} clase="text-red-500" />
           <DatoStock etiqueta="Venta USD" valor={'$ ' + fmt(item.precio_usd)} clase="text-green-600" />
           <DatoStock etiqueta="Venta ARS" valor={'$ ' + fmt(Math.round(item.precio_usd * cot))} clase="text-gray-800" />
+          {item.promediado && (
+            <span
+              className="col-span-3 text-[9px] font-bold text-blue-500 uppercase tracking-wide"
+              title="Costo y venta son el promedio ponderado de ingresos con distintos valores"
+            >
+              Promediado
+            </span>
+          )}
         </div>
         <div className="md:text-right">
           <button
@@ -596,6 +644,7 @@ function Admin() {
   const [formAbierto, setFormAbierto] = useState(null); // null = segun el tamano de pantalla
   const [familiasAbiertas, setFamiliasAbiertas] = useState({});
   const [asignacion, setAsignacion] = useState(null); // { item, tabla, nombre, cantidad, precio (ARS por unidad) }
+  const [suma, setSuma] = useState(null); // { item, tabla, cantidad }
   const [borrado, setBorrado] = useState(null); // { item, tabla, cantidad }
   const [resolucion, setResolucion] = useState(null); // { lote, destino, cantidad }
   const [dialogo, setDialogo] = useState(null); // { titulo, texto, botones: [{ etiqueta, clase, accion }] }
@@ -613,9 +662,9 @@ function Admin() {
   // cotizacion_venta, registra la venta igual sin ese dato.
   async function marcarVendido(tabla, ids, cambios, fecha = new Date().toISOString()) {
     const base = { estado: 'vendido', fecha_venta: fecha, ...cambios };
-    const resultado = await supabase.from(tabla).update({ ...base, cotizacion_venta: cot }).in('id', ids);
+    const resultado = await porTandas(ids, (tanda) => supabase.from(tabla).update({ ...base, cotizacion_venta: cot }).in('id', tanda));
     if (resultado.error && String(resultado.error.message).includes('cotizacion_venta')) {
-      return supabase.from(tabla).update(base).in('id', ids);
+      return porTandas(ids, (tanda) => supabase.from(tabla).update(base).in('id', tanda));
     }
     return resultado;
   }
@@ -693,7 +742,7 @@ function Admin() {
         setDescuentoMayorista(config.data.descuento_mayorista);
       }
     }
-    if (celDisponibles.data) setStockCelulares(agruparStock(celDisponibles.data, claveCelular, (l) => ordenarPorPrecio(l, (c) => c.modelo, compararCelulares)));
+    if (celDisponibles.data) setStockCelulares(agruparStock(celDisponibles.data, claveCelular, (l) => ordenarPorPrecio(l, (c) => c.modelo, compararCelulares, (c) => marcaDeModelo(c.modelo))));
     if (accDisponibles.data) setStockAccesorios(agruparStock(accDisponibles.data, claveAccesorio, (l) => ordenarPorPrecio(l, (x) => x.tipo, compararAccesorios)));
 
     const ventasUnificadas = [
@@ -1049,7 +1098,7 @@ function Admin() {
     const precio = precioArs / cot;
     const ids = item.ids.slice(0, cantidadAsignacion);
     setAsignacion(null);
-    const { error } = await supabase
+    const { error } = await porTandas(ids, (tanda) => supabase
       .from(tabla)
       .update({
         estado: 'revendedor',
@@ -1057,7 +1106,7 @@ function Admin() {
         precio_revendedor: redondear(precio),
         fecha_revendedor: new Date().toISOString(),
       })
-      .in('id', ids);
+      .in('id', tanda));
     if (error) {
       toast.error('Error al asignar: ' + error.message);
       return;
@@ -1072,10 +1121,10 @@ function Admin() {
     const { error } =
       destino === 'vendido'
         ? await marcarVendido(tabla, ids, { precio_usd: precioUnidad })
-        : await supabase
+        : await porTandas(ids, (tanda) => supabase
             .from(tabla)
             .update({ estado: 'disponible', revendedor: null, precio_revendedor: null, fecha_revendedor: null })
-            .in('id', ids);
+            .in('id', tanda));
     if (error) {
       toast.error('Error al actualizar: ' + error.message);
       return;
@@ -1099,6 +1148,33 @@ function Admin() {
     await resolverRevendedor(ids, lote.tabla, destino, lote.precioUnidad);
   }
 
+  // ---------- Sumar stock a un lote existente ----------
+  const cantidadSuma = suma ? Math.max(1, parseInt(suma.cantidad) || 1) : 0;
+
+  async function sumarStock() {
+    const { item, tabla } = suma;
+    const comunes = {
+      modelo: item.modelo,
+      color: item.color,
+      costo_usd: Number(item.costo_usd),
+      precio_usd: Number(item.precio_usd),
+      detalles: item.detalles || '',
+    };
+    const filaBase =
+      tabla === 'celulares'
+        ? { ...comunes, capacidad: item.capacidad, bateria: item.bateria }
+        : { ...comunes, tipo: item.tipo };
+    const cantidad = cantidadSuma;
+    setSuma(null);
+    const { error } = await guardarLoteConPromedio(tabla, filaBase, cantidad, tabla === 'celulares' ? claveCelular : claveAccesorio);
+    if (error) {
+      toast.error('Error al sumar stock: ' + error.message);
+      return;
+    }
+    toast.success(cantidad + ' unidad(es) sumada(s) al stock');
+    cargarDatos(false);
+  }
+
   // ---------- Borrado ----------
   const confirmarBorrado = (item, tabla) => setBorrado({ item, tabla, cantidad: 1 });
 
@@ -1112,7 +1188,7 @@ function Admin() {
   }
 
   async function ejecutarBorrado(idsArray, tabla) {
-    const { error } = await supabase.from(tabla).delete().in('id', idsArray);
+    const { error } = await porTandas(idsArray, (tanda) => supabase.from(tabla).delete().in('id', tanda));
     if (error) {
       toast.error('Error al borrar: ' + error.message);
       return;
@@ -1153,7 +1229,7 @@ function Admin() {
       toast.error('El modelo no puede quedar vacio');
       return;
     }
-    const { error } = await supabase
+    const { error } = await porTandas(datos.ids, (tanda) => supabase
       .from('celulares')
       .update({
         modelo,
@@ -1164,9 +1240,11 @@ function Admin() {
         precio_usd: datos.precio_usd,
         detalles: String(formEdicionCelular.detalles || '').trim(),
       })
-      .in('id', datos.ids);
+      .in('id', tanda));
 
     if (!error) {
+      // Los valores cargados a mano ya no son un promedio (columna opcional: se ignora si falta)
+      await porTandas(datos.ids, (tanda) => supabase.from('celulares').update({ promediado: false }).in('id', tanda));
       toast.success(datos.ids.length + ' equipo(s) actualizado(s)');
       setEditandoCelularId(null);
       cargarDatos(false);
@@ -1187,7 +1265,7 @@ function Admin() {
       toast.error('El tipo no puede quedar vacio');
       return;
     }
-    const { error } = await supabase
+    const { error } = await porTandas(datos.ids, (tanda) => supabase
       .from('accesorios')
       .update({
         tipo,
@@ -1197,9 +1275,11 @@ function Admin() {
         precio_usd: datos.precio_usd,
         detalles: String(formEdicionAccesorio.detalles || '').trim(),
       })
-      .in('id', datos.ids);
+      .in('id', tanda));
 
     if (!error) {
+      // Los valores cargados a mano ya no son un promedio (columna opcional: se ignora si falta)
+      await porTandas(datos.ids, (tanda) => supabase.from('accesorios').update({ promediado: false }).in('id', tanda));
       toast.success(datos.ids.length + ' accesorio(s) actualizado(s)');
       setEditandoAccesorioId(null);
       cargarDatos(false);
@@ -1628,7 +1708,7 @@ function Admin() {
                 <p className="font-black text-lg md:text-2xl text-green-600 break-words">$ {fmt(Math.round(totalEnLaCalleUsd * cot))}</p>
               </div>
               <p className="col-span-2 md:col-span-3 text-[11px] text-gray-400">
-                Equipos entregados a consignacion. No figuran en el catalogo publico ni en el stock disponible. Para sumar uno, usa Opciones y luego "A revendedor" en el stock.
+                Equipos entregados a consignacion. Siguen apareciendo en el catalogo publico (con una "R" cuando es la unica unidad), pero no en el stock disponible. Para sumar uno, usa Opciones y luego "A revendedor" en el stock.
               </p>
             </div>
 
@@ -1941,6 +2021,16 @@ function Admin() {
                 onClick={() => {
                   const { item, tabla } = menu;
                   setMenu(null);
+                  setSuma({ item, tabla, cantidad: 1 });
+                }}
+                className="px-4 py-3 text-sm font-bold text-gray-900 bg-white hover:bg-gray-100 text-left border-b border-gray-50"
+              >
+                Sumar stock
+              </button>
+              <button
+                onClick={() => {
+                  const { item, tabla } = menu;
+                  setMenu(null);
                   setAsignacion({ item, tabla, nombre: '', cantidad: 1, precio: Math.round(item.precio_usd * cot) });
                 }}
                 className="px-4 py-3 text-sm font-bold text-gray-900 bg-white hover:bg-gray-100 text-left border-b border-gray-50"
@@ -2039,7 +2129,7 @@ function Admin() {
                 {cot ? ' = USD ' + fmt(((Number(asignacion.precio) || 0) * cantidadAsignacion) / cot) : ''}
               </p>
               <p className="text-[11px] font-medium text-purple-700 mt-2">
-                El equipo sale del stock y del catalogo publico, pero no se cuenta como vendido hasta que el revendedor pague.
+                El equipo sale del stock disponible pero sigue apareciendo en el catalogo publico. No se cuenta como vendido hasta que el revendedor pague.
               </p>
             </div>
 
@@ -2140,6 +2230,64 @@ function Admin() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* MODAL: SUMAR STOCK */}
+      {suma && (
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <form
+            onSubmit={conBloqueo(sumarStock)}
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto"
+          >
+            <h2 className="text-xl font-bold text-gray-800">Sumar stock</h2>
+            <p className="text-sm font-semibold text-gray-600 mt-1 break-words">{nombreItem(suma.item, suma.tabla)}</p>
+
+            <label className="text-xs font-bold text-gray-600 mt-4 mb-1 block">
+              Cantidad a ingresar (hoy hay {suma.item.cantidad} en stock)
+            </label>
+            <div className="flex items-stretch gap-2">
+              <button
+                type="button"
+                aria-label="Restar una unidad"
+                onClick={() => setSuma({ ...suma, cantidad: Math.max(1, cantidadSuma - 1) })}
+                disabled={cantidadSuma <= 1}
+                className="w-12 shrink-0 bg-gray-200 text-gray-800 rounded-lg font-black text-xl hover:bg-gray-300 disabled:opacity-40"
+              >
+                -
+              </button>
+              <input
+                type="number"
+                min="1"
+                autoFocus
+                value={suma.cantidad}
+                onChange={(e) => setSuma({ ...suma, cantidad: e.target.value })}
+                onBlur={() => setSuma({ ...suma, cantidad: cantidadSuma })}
+                className="flex-1 min-w-0 border border-gray-300 rounded-lg p-2.5 text-center text-lg font-black text-gray-800 outline-none focus:border-blue-500"
+              />
+              <button
+                type="button"
+                aria-label="Sumar una unidad"
+                onClick={() => setSuma({ ...suma, cantidad: cantidadSuma + 1 })}
+                className="w-12 shrink-0 bg-gray-200 text-gray-800 rounded-lg font-black text-xl hover:bg-gray-300"
+              >
+                +
+              </button>
+            </div>
+
+            <p className="mt-3 bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs font-semibold text-gray-600">
+              Se cargan con los mismos datos del lote: costo USD {fmt(suma.item.costo_usd)} y venta USD {fmt(suma.item.precio_usd)} por unidad. El lote pasa a tener {suma.item.cantidad + cantidadSuma} unidades. Si esta compra tuvo otro costo, usa "Nuevo Ingreso" para que se promedie.
+            </p>
+
+            <div className="flex gap-3 mt-4">
+              <button type="button" onClick={() => setSuma(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
+                Cancelar
+              </button>
+              <button type="submit" disabled={guardando} className="disabled:opacity-60 flex-1 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition">
+                Sumar {cantidadSuma}
+              </button>
+            </div>
+          </form>
         </div>
       )}
 

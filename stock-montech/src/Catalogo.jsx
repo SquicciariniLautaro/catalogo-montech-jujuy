@@ -109,9 +109,19 @@ const compararAccesorios = (a, b) => {
   return (Number(a.precio_usd) || 0) - (Number(b.precio_usd) || 0);
 };
 
+// Marca de un celular segun su modelo. Los iPhone se cargan sin marca ("13 PRO", "iPhone 13")
+// y devuelven ''; el resto lleva la marca como primera palabra ("Samsung A55" -> "SAMSUNG").
+const marcaDeModelo = (modelo) => {
+  const texto = normalizar(modelo);
+  if (texto === '' || /^\d/.test(texto) || texto.startsWith('IPHONE')) return '';
+  return texto.split(' ')[0];
+};
+
 // Ordena de menor a mayor precio sin romper los grupos por familia: las familias van segun
 // su producto mas barato y, dentro de cada familia, los productos de menor a mayor precio
-const ordenarPorPrecio = (lista, obtenerFamilia, desempate) => {
+//
+// Con varias marcas, primero van los iPhone y despues cada marca junta, en orden alfabetico.
+const ordenarPorPrecio = (lista, obtenerFamilia, desempate, obtenerMarca = () => '') => {
   const precio = (item) => Number(item.precio_usd) || 0;
   const minimos = {};
   lista.forEach((item) => {
@@ -119,6 +129,9 @@ const ordenarPorPrecio = (lista, obtenerFamilia, desempate) => {
     if (!(familia in minimos) || precio(item) < minimos[familia]) minimos[familia] = precio(item);
   });
   return [...lista].sort((a, b) => {
+    const ma = obtenerMarca(a);
+    const mb = obtenerMarca(b);
+    if (ma !== mb) return ma === '' ? -1 : mb === '' ? 1 : comparar(ma, mb);
     const fa = normalizar(obtenerFamilia(a));
     const fb = normalizar(obtenerFamilia(b));
     if (fa !== fb) return minimos[fa] - minimos[fb] || comparar(fa, fb);
@@ -209,7 +222,7 @@ function Catalogo() {
         );
 
         if (celularesData) {
-          setCelularesAgrupados(ordenarPorPrecio(agruparCatalogo(celularesData, claveCelular), (x) => x.modelo, compararCelulares));
+          setCelularesAgrupados(ordenarPorPrecio(agruparCatalogo(celularesData, claveCelular), (x) => x.modelo, compararCelulares, (x) => marcaDeModelo(x.modelo)));
         }
 
         const { data: accesoriosData, error: errorAccesorios } = await traerTodo(() =>
