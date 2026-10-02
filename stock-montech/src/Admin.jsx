@@ -386,42 +386,116 @@ function EncabezadoStock({ titulo, columna, stats, lotes, busqueda, onBusqueda }
   );
 }
 
-// Fila de stock: tarjeta apilada en celulares, fila de tres columnas en escritorio
-function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
+// Flecha que gira cuando la seccion esta abierta
+function IconoFlecha({ abierto }) {
   return (
-    <div className={'p-3 md:px-4 flex flex-col gap-3 hover:bg-gray-50 transition ' + COLUMNAS_STOCK}>
-      <div className="min-w-0">
-        <div className="flex items-start gap-2">
-          <span className="shrink-0 bg-blue-600 text-white px-2 py-0.5 rounded text-xs font-bold shadow-sm" title="Unidades en stock">
-            {item.cantidad} u.
+    <svg
+      className={'w-4 h-4 shrink-0 text-gray-400 transition-transform ' + (abierto ? 'rotate-180' : '')}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 9l-7 7-7-7" />
+    </svg>
+  );
+}
+
+// Agrupa una lista ya ordenada en familias consecutivas (modelo o tipo)
+const agruparFamilias = (lista, campo) => {
+  const familias = [];
+  lista.forEach((item) => {
+    const nombre = String(item[campo] || 'Sin nombre').trim();
+    const clave = normalizar(nombre);
+    const ultima = familias[familias.length - 1];
+    if (ultima && ultima.clave === clave) {
+      ultima.items.push(item);
+      ultima.unidades += item.cantidad;
+    } else {
+      familias.push({ clave, nombre, items: [item], unidades: item.cantidad });
+    }
+  });
+  return familias;
+};
+
+// Encabezado de una familia del stock: se toca para abrir o cerrar sus lotes
+function EncabezadoFamilia({ familia, abierta, cot, onAlternar }) {
+  const precioMinimo = Math.min(...familia.items.map((i) => Number(i.precio_usd) || 0));
+  return (
+    <button
+      type="button"
+      onClick={onAlternar}
+      aria-expanded={abierta}
+      className="w-full flex items-center gap-2 px-3 md:px-4 py-2.5 bg-gray-100 hover:bg-gray-200 text-left transition"
+    >
+      <span className="min-w-0 flex-1 truncate font-black text-gray-800 text-sm uppercase tracking-wide">{familia.nombre}</span>
+      <span className="shrink-0 text-[11px] font-semibold text-gray-500">
+        {familia.unidades} u. - desde $ {fmt(Math.round(precioMinimo * cot))}
+      </span>
+      <IconoFlecha abierto={abierta} />
+    </button>
+  );
+}
+
+// Fila de stock. En celulares es un renglon compacto que se abre al tocarlo para ver los
+// precios y las acciones; en escritorio es una fila de tres columnas siempre visible.
+function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
+  const [abierto, setAbierto] = useState(false);
+  return (
+    <div className="hover:bg-gray-50 transition">
+      <button
+        type="button"
+        onClick={() => setAbierto(!abierto)}
+        aria-expanded={abierto}
+        className="md:hidden w-full flex items-center gap-2 px-3 py-2.5 text-left"
+      >
+        <span className="shrink-0 bg-blue-600 text-white px-2 py-0.5 rounded text-xs font-bold shadow-sm">{item.cantidad} u.</span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-1.5">
+            <span className="truncate font-bold text-gray-900 text-sm">{titulo}</span>
+            <CirculoColor color={item.color} soloCirculo />
           </span>
-          <span className="min-w-0 break-words font-bold text-gray-900 text-base md:text-sm leading-tight">{titulo}</span>
-        </div>
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-gray-600">
-          {item.color && (
-            <span className="inline-flex items-center gap-1">
-              <CirculoColor color={item.color} soloCirculo />
-              {item.color}
+          <span className="block truncate text-[11px] font-medium text-gray-500">
+            {[item.color, ...subtitulo].filter(Boolean).join(' - ')}
+          </span>
+        </span>
+        <span className="shrink-0 text-sm font-bold text-gray-800">$ {fmt(Math.round(item.precio_usd * cot))}</span>
+        <IconoFlecha abierto={abierto} />
+      </button>
+
+      <div className={(abierto ? 'flex' : 'hidden') + ' flex-col gap-3 px-3 pb-3 md:px-4 md:py-3 ' + COLUMNAS_STOCK}>
+        <div className="hidden md:block min-w-0">
+          <div className="flex items-start gap-2">
+            <span className="shrink-0 bg-blue-600 text-white px-2 py-0.5 rounded text-xs font-bold shadow-sm" title="Unidades en stock">
+              {item.cantidad} u.
             </span>
-          )}
-          {subtitulo.map((dato) => (
-            <span key={dato} className="break-words min-w-0">{dato}</span>
-          ))}
+            <span className="min-w-0 break-words font-bold text-gray-900 text-sm leading-tight">{titulo}</span>
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-gray-600">
+            {item.color && (
+              <span className="inline-flex items-center gap-1">
+                <CirculoColor color={item.color} soloCirculo />
+                {item.color}
+              </span>
+            )}
+            {subtitulo.map((dato) => (
+              <span key={dato} className="break-words min-w-0">{dato}</span>
+            ))}
+          </div>
         </div>
-      </div>
-      <div className="grid grid-cols-3 gap-2 bg-gray-50 md:bg-transparent rounded-lg p-2 md:p-0">
-        <DatoStock etiqueta="Costo USD" valor={'$ ' + fmt(item.costo_usd)} clase="text-red-500" />
-        <DatoStock etiqueta="Venta USD" valor={'$ ' + fmt(item.precio_usd)} clase="text-green-600" />
-        <DatoStock etiqueta="Venta ARS" valor={'$ ' + fmt(Math.round(item.precio_usd * cot))} clase="text-gray-800" />
-      </div>
-      <div className="md:text-right">
-        <button
-          onClick={onOpciones}
-          className="w-full md:w-auto bg-gray-200 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg font-bold hover:bg-gray-300 transition text-xs shadow-sm"
-        >
-          Opciones
-          <IconoChevron />
-        </button>
+        <div className="grid grid-cols-3 gap-2 bg-gray-50 md:bg-transparent rounded-lg p-2 md:p-0">
+          <DatoStock etiqueta="Costo USD" valor={'$ ' + fmt(item.costo_usd)} clase="text-red-500" />
+          <DatoStock etiqueta="Venta USD" valor={'$ ' + fmt(item.precio_usd)} clase="text-green-600" />
+          <DatoStock etiqueta="Venta ARS" valor={'$ ' + fmt(Math.round(item.precio_usd * cot))} clase="text-gray-800" />
+        </div>
+        <div className="md:text-right">
+          <button
+            onClick={onOpciones}
+            className="w-full md:w-auto bg-gray-200 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg font-bold hover:bg-gray-300 transition text-xs shadow-sm"
+          >
+            Opciones
+            <IconoChevron />
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -486,6 +560,10 @@ function Admin() {
   const [menu, setMenu] = useState(null); // { key, item, tabla, top, right }
   const [venta, setVenta] = useState(null); // { item, tabla, cantidad, mayorista }
   const [busquedaStock, setBusquedaStock] = useState('');
+  // En pantallas chicas el formulario de ingreso y las familias del stock arrancan cerrados
+  const [esEscritorio] = useState(() => window.matchMedia('(min-width: 768px)').matches);
+  const [formAbierto, setFormAbierto] = useState(null); // null = segun el tamano de pantalla
+  const [familiasAbiertas, setFamiliasAbiertas] = useState({});
   const [asignacion, setAsignacion] = useState(null); // { item, tabla, nombre, cantidad, precio }
   const [resolucion, setResolucion] = useState(null); // { lote, destino, cantidad }
   const [dialogo, setDialogo] = useState(null); // { titulo, texto, botones: [{ etiqueta, clase, accion }] }
@@ -510,6 +588,17 @@ function Admin() {
 
   // Lote del stock que se entrega al cliente en la permuta (opcional)
   const lotePermuta = stockCelulares.find((c) => String(c.ids[0]) === formPermuta.entregaId) || null;
+
+  const formVisible = formAbierto === null ? esEscritorio : formAbierto;
+
+  // Una familia se muestra abierta si se esta buscando, o segun lo que se haya tocado
+  const familiaAbierta = (tab, clave) => {
+    if (busquedaStock.trim()) return true;
+    const guardado = familiasAbiertas[tab + '|' + clave];
+    return guardado === undefined ? esEscritorio : guardado;
+  };
+  const alternarFamilia = (tab, clave, abierta) =>
+    setFamiliasAbiertas({ ...familiasAbiertas, [tab + '|' + clave]: !abierta });
 
   const cambiarTab = (tab) => {
     setActiveTab(tab);
@@ -1029,9 +1118,10 @@ function Admin() {
   const gananciaVentasUSD = ventasFiltradas.reduce((acc, item) => acc + (item.precio_usd - item.costo_usd), 0);
   const gananciaVentasARS = gananciaVentasUSD * cot;
 
-  const totalPaginas = Math.ceil(ventasFiltradas.length / VENTAS_POR_PAGINA);
+  const ventasPorPagina = esEscritorio ? VENTAS_POR_PAGINA : 5;
+  const totalPaginas = Math.ceil(ventasFiltradas.length / ventasPorPagina);
   const pagina = Math.min(paginaActual, Math.max(1, totalPaginas));
-  const ventasPaginadas = ventasFiltradas.slice((pagina - 1) * VENTAS_POR_PAGINA, pagina * VENTAS_POR_PAGINA);
+  const ventasPaginadas = ventasFiltradas.slice((pagina - 1) * ventasPorPagina, pagina * ventasPorPagina);
 
   // Total vendido por mes (ultimos 12 meses con ventas). No se guarda la cotizacion de cada
   // venta, asi que los pesos se calculan con la cotizacion actual.
@@ -1041,7 +1131,7 @@ function Admin() {
     return { mes, unidades: ventasMes.length, totalUsd, totalArs: totalUsd * cot };
   });
 
-  const datosGrafico = mesesDisponibles
+  const gananciaPorMes = mesesDisponibles
     .slice(0, 6)
     .reverse()
     .map((mes) => {
@@ -1049,9 +1139,33 @@ function Admin() {
       const ganancia = ventasMes.reduce((acc, c) => acc + (c.precio_usd - c.costo_usd), 0);
       const [, month] = mes.split('-');
       return { name: MESES[parseInt(month) - 1] + ' ' + mes.slice(0, 4), Ganancia: redondear(ganancia) };
-    })
-    // Una torta no puede dibujar valores negativos: un mes con perdida ocupa 0 en el grafico
-    // pero conserva su valor real en la lista
+    });
+
+  // Con un mes elegido, el grafico muestra de donde salio la ganancia de ese mes:
+  // los 5 modelos (o tipos de accesorio) que mas dejaron y el resto agrupado en "Otros"
+  const gananciaPorModelo = (() => {
+    const totales = {};
+    ventasFiltradas.forEach((v) => {
+      const nombre = String((v.categoria === 'celular' ? v.modelo : v.tipo) || 'Sin nombre').trim();
+      totales[nombre] = (totales[nombre] || 0) + (v.precio_usd - v.costo_usd);
+    });
+    const ordenados = Object.entries(totales)
+      .map(([name, ganancia]) => ({ name, Ganancia: redondear(ganancia) }))
+      .sort((a, b) => b.Ganancia - a.Ganancia);
+    if (ordenados.length <= COLORES_GRAFICO.length) return ordenados;
+    const principales = ordenados.slice(0, COLORES_GRAFICO.length - 1);
+    const resto = ordenados.slice(COLORES_GRAFICO.length - 1).reduce((acc, d) => acc + d.Ganancia, 0);
+    return [...principales, { name: 'Otros', Ganancia: redondear(resto) }];
+  })();
+
+  const graficoPorMes = mesSeleccionado === 'todos';
+  const tituloGrafico = graficoPorMes
+    ? 'Ganancia por mes (ultimos 6 meses, USD)'
+    : 'Ganancia de ' + formatearNombreMes(mesSeleccionado) + ' por modelo (USD)';
+
+  // Una torta no puede dibujar valores negativos: una porcion con perdida ocupa 0 en el grafico
+  // pero conserva su valor real en la lista
+  const datosGrafico = (graficoPorMes ? gananciaPorMes : gananciaPorModelo)
     .map((d, i) => ({ ...d, valor: Math.max(0, d.Ganancia), color: COLORES_GRAFICO[i % COLORES_GRAFICO.length] }));
   const totalGrafico = datosGrafico.reduce((acc, d) => acc + d.Ganancia, 0);
   const totalTorta = datosGrafico.reduce((acc, d) => acc + d.valor, 0);
@@ -1061,8 +1175,8 @@ function Admin() {
   }
 
   const claseTab = (tab) =>
-    'flex-1 md:flex-none py-3 px-1.5 md:px-6 text-xs sm:text-sm font-bold rounded-t-lg transition ' +
-    (activeTab === tab ? 'bg-white border-t border-l border-r border-gray-200 text-blue-600' : 'text-gray-500 hover:bg-gray-100');
+    'py-2.5 px-3 md:px-6 text-sm font-bold rounded-xl border transition ' +
+    (activeTab === tab ? 'bg-gray-900 text-white border-gray-900 shadow-sm' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50');
 
   const claseBotonAgregar = 'flex-1 bg-blue-600 text-white py-3 md:py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition text-sm disabled:opacity-60';
 
@@ -1129,19 +1243,32 @@ function Admin() {
 
       <div className="flex flex-col gap-6 md:gap-8 max-w-6xl mx-auto w-full">
         {/* TABS */}
-        <div className="flex gap-2 border-b border-gray-200">
+        <div className="grid grid-cols-2 md:flex gap-2">
           <button onClick={() => cambiarTab('celulares')} className={claseTab('celulares')}>Celulares</button>
           <button onClick={() => cambiarTab('accesorios')} className={claseTab('accesorios')}>Accesorios</button>
           <button onClick={() => cambiarTab('revendedores')} className={claseTab('revendedores')}>
             Revendedores{enRevendedor.length > 0 ? ' (' + enRevendedor.length + ')' : ''}
           </button>
+          <button onClick={() => cambiarTab('ventas')} className={claseTab('ventas')}>Ventas</button>
         </div>
 
         {/* ===================== TAB CELULARES ===================== */}
         {activeTab === 'celulares' && (
           <div className="space-y-4 md:space-y-6">
             <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200">
-              <h2 className="text-lg font-bold mb-4 md:mb-5 text-gray-800">Nuevo Ingreso de Celular</h2>
+              <button
+                type="button"
+                onClick={() => setFormAbierto(!formVisible)}
+                aria-expanded={formVisible}
+                className="w-full flex items-center justify-between gap-3 text-left"
+              >
+                <span className="text-lg font-bold text-gray-800">Nuevo Ingreso de Celular</span>
+                <span className="shrink-0 bg-blue-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm">
+                  {formVisible ? 'Cerrar' : '+ Agregar'}
+                </span>
+              </button>
+              {formVisible && (
+              <div className="mt-4 md:mt-5">
               <form onSubmit={conBloqueo(handleGuardarCelular)} autoComplete="off" className="flex flex-col md:flex-row gap-3">
                 <div className="flex-1 grid grid-cols-2 md:grid-cols-4 gap-3">
                   <input required name="modelo" value={formCelular.modelo} onChange={handleChangeCelular} type="text" placeholder="Mod. (Ej: 14 PRO)" className={claseInput} />
@@ -1168,6 +1295,8 @@ function Admin() {
               <p className="text-[11px] text-gray-400 mt-3">
                 Si el modelo, capacidad, color, bateria y detalles coinciden con un lote existente, las unidades se suman a ese lote y el costo y el precio de venta se recalculan como promedio ponderado.
               </p>
+              </div>
+              )}
             </div>
 
             <ResumenStock etiqueta="Total Celulares" stats={statsCelulares} />
@@ -1175,7 +1304,17 @@ function Admin() {
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
               <EncabezadoStock titulo="Stock de Celulares" columna="Equipo" stats={statsCelulares} lotes={stockCelulares.length} busqueda={busquedaStock} onBusqueda={setBusquedaStock} />
               <div className="divide-y divide-gray-100 md:max-h-[400px] md:overflow-y-auto">
-                {celularesVisibles.map((celu) =>
+                {agruparFamilias(celularesVisibles, 'modelo').map((familia) => {
+                  const abierta = familiaAbierta('celulares', familia.clave);
+                  return (
+                    <Fragment key={familia.clave}>
+                      <EncabezadoFamilia
+                        familia={familia}
+                        abierta={abierta}
+                        cot={cot}
+                        onAlternar={() => alternarFamilia('celulares', familia.clave, abierta)}
+                      />
+                      {abierta && familia.items.map((celu) =>
                   editandoCelularId === celu.ids[0] ? (
                     <div key={celu.ids[0]} className="p-3 md:p-4 bg-blue-50/40">
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
@@ -1222,6 +1361,9 @@ function Admin() {
                     />
                   )
                 )}
+                    </Fragment>
+                  );
+                })}
               </div>
               {celularesVisibles.length === 0 && (
                 <p className="text-center p-8 text-gray-500">
@@ -1236,7 +1378,19 @@ function Admin() {
         {activeTab === 'accesorios' && (
           <div className="space-y-4 md:space-y-6">
             <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200">
-              <h2 className="text-lg font-bold mb-4 md:mb-5 text-gray-800">Nuevo Ingreso de Accesorio</h2>
+              <button
+                type="button"
+                onClick={() => setFormAbierto(!formVisible)}
+                aria-expanded={formVisible}
+                className="w-full flex items-center justify-between gap-3 text-left"
+              >
+                <span className="text-lg font-bold text-gray-800">Nuevo Ingreso de Accesorio</span>
+                <span className="shrink-0 bg-blue-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm">
+                  {formVisible ? 'Cerrar' : '+ Agregar'}
+                </span>
+              </button>
+              {formVisible && (
+              <div className="mt-4 md:mt-5">
               <form onSubmit={conBloqueo(handleGuardarAccesorio)} autoComplete="off" className="flex flex-col md:flex-row gap-3">
                 <div className="flex-1 grid grid-cols-2 md:grid-cols-3 gap-3">
                   <input required name="tipo" value={formAccesorio.tipo} onChange={handleChangeAccesorio} type="text" placeholder="Tipo (Ej: Funda)" className={claseInput} />
@@ -1262,6 +1416,8 @@ function Admin() {
               <p className="text-[11px] text-gray-400 mt-3">
                 Si el tipo, modelo, color y detalles coinciden con un lote existente, las unidades se suman a ese lote y el costo y el precio de venta se recalculan como promedio ponderado.
               </p>
+              </div>
+              )}
             </div>
 
             <ResumenStock etiqueta="Total Accesorios" stats={statsAccesorios} />
@@ -1269,7 +1425,17 @@ function Admin() {
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
               <EncabezadoStock titulo="Stock de Accesorios" columna="Accesorio" stats={statsAccesorios} lotes={stockAccesorios.length} busqueda={busquedaStock} onBusqueda={setBusquedaStock} />
               <div className="divide-y divide-gray-100 md:max-h-[400px] md:overflow-y-auto">
-                {accesoriosVisibles.map((acc) =>
+                {agruparFamilias(accesoriosVisibles, 'tipo').map((familia) => {
+                  const abierta = familiaAbierta('accesorios', familia.clave);
+                  return (
+                    <Fragment key={familia.clave}>
+                      <EncabezadoFamilia
+                        familia={familia}
+                        abierta={abierta}
+                        cot={cot}
+                        onAlternar={() => alternarFamilia('accesorios', familia.clave, abierta)}
+                      />
+                      {abierta && familia.items.map((acc) =>
                   editandoAccesorioId === acc.ids[0] ? (
                     <div key={acc.ids[0]} className="p-3 md:p-4 bg-blue-50/40">
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
@@ -1313,6 +1479,9 @@ function Admin() {
                     />
                   )
                 )}
+                    </Fragment>
+                  );
+                })}
               </div>
               {accesoriosVisibles.length === 0 && (
                 <p className="text-center p-8 text-gray-500">
@@ -1417,8 +1586,9 @@ function Admin() {
           </div>
         )}
 
-        {/* ===================== HISTORIAL GLOBAL ===================== */}
-        <div className="space-y-4 pt-6 md:pt-8 border-t border-gray-200 mt-2 md:mt-4">
+        {/* ===================== TAB VENTAS ===================== */}
+        {activeTab === 'ventas' && (
+        <div className="space-y-4">
           <div className="flex flex-col md:flex-row justify-between md:items-end gap-3">
             <h2 className="text-xl md:text-2xl font-bold text-gray-800">Historial Global de Ventas</h2>
             <div className="flex gap-2 w-full md:w-auto">
@@ -1490,7 +1660,7 @@ function Admin() {
             {datosGrafico.length > 0 && (
               <div className="min-w-0 bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200">
                 <h3 className="text-xs md:text-sm font-bold text-gray-500 mb-3 uppercase tracking-wider text-center">
-                  Ganancia por mes (ultimos 6 meses, USD)
+                  {tituloGrafico}
                 </h3>
                 <div className="relative h-52 w-full">
                   <ResponsiveContainer width="100%" height="100%">
@@ -1602,6 +1772,7 @@ function Admin() {
             </div>
           </div>
         </div>
+        )}
       </div>
 
       {/* FOOTER */}
