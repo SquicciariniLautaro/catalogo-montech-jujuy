@@ -309,6 +309,37 @@ function SelectorColor({ etiqueta, valor, onCambio }) {
   );
 }
 
+// "6000000.5" -> "6.000.000,5" (formato argentino) para mostrar dentro del campo
+const formatearMiles = (crudo) => {
+  const texto = String(crudo === null || crudo === undefined ? '' : crudo);
+  if (texto === '') return '';
+  const [entero, decimales] = texto.split('.');
+  const enteroConPuntos = entero.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  return decimales === undefined ? enteroConPuntos : enteroConPuntos + ',' + decimales;
+};
+
+// Lo que escribe el usuario ("6.000.000,5") -> numero puro como texto ("6000000.5")
+const limpiarPesos = (escrito) => {
+  const texto = String(escrito).replace(/\./g, '').replace(/,/g, '.').replace(/[^\d.]/g, '');
+  const corte = texto.indexOf('.');
+  return corte === -1 ? texto : texto.slice(0, corte + 1) + texto.slice(corte + 1).replace(/\./g, '');
+};
+
+// Campo para montos en pesos: muestra los puntos de miles mientras se escribe, pero entrega
+// el numero puro (sin puntos) para que los calculos y la conversion a USD no cambien
+function InputPesos({ value, onChange, ...props }) {
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      autoComplete="off"
+      value={formatearMiles(value)}
+      onChange={(e) => onChange(limpiarPesos(e.target.value))}
+      {...props}
+    />
+  );
+}
+
 // Campo con etiqueta para los formularios de edicion
 function Campo({ etiqueta, className = '', children }) {
   return (
@@ -565,6 +596,7 @@ function Admin() {
   const [formAbierto, setFormAbierto] = useState(null); // null = segun el tamano de pantalla
   const [familiasAbiertas, setFamiliasAbiertas] = useState({});
   const [asignacion, setAsignacion] = useState(null); // { item, tabla, nombre, cantidad, precio (ARS por unidad) }
+  const [borrado, setBorrado] = useState(null); // { item, tabla, cantidad }
   const [resolucion, setResolucion] = useState(null); // { lote, destino, cantidad }
   const [dialogo, setDialogo] = useState(null); // { titulo, texto, botones: [{ etiqueta, clase, accion }] }
   const [guardando, setGuardando] = useState(false);
@@ -1068,22 +1100,16 @@ function Admin() {
   }
 
   // ---------- Borrado ----------
-  const confirmarBorrado = (item, tabla) => {
-    const nombre = tabla === 'celulares' ? item.modelo + ' ' + (item.capacidad || '') : item.tipo + ' - ' + item.modelo;
-    const botones = [{ etiqueta: 'Borrar 1 unidad', clase: 'bg-red-500 hover:bg-red-600', accion: () => ejecutarBorrado([item.ids[0]], tabla) }];
-    if (item.cantidad > 1) {
-      botones.push({
-        etiqueta: 'Borrar las ' + item.cantidad + ' unidades',
-        clase: 'bg-red-700 hover:bg-red-800',
-        accion: () => ejecutarBorrado(item.ids, tabla),
-      });
-    }
-    setDialogo({
-      titulo: 'Borrar del stock',
-      texto: nombre + (item.color ? ' - ' + item.color : '') + '. Esta accion no se puede deshacer.',
-      botones,
-    });
-  };
+  const confirmarBorrado = (item, tabla) => setBorrado({ item, tabla, cantidad: 1 });
+
+  const cantidadBorrado = borrado ? Math.min(borrado.item.cantidad, Math.max(1, parseInt(borrado.cantidad) || 1)) : 0;
+
+  async function confirmarBorradoElegido() {
+    const { item, tabla } = borrado;
+    const ids = item.ids.slice(0, cantidadBorrado);
+    setBorrado(null);
+    await ejecutarBorrado(ids, tabla);
+  }
 
   async function ejecutarBorrado(idsArray, tabla) {
     const { error } = await supabase.from(tabla).delete().in('id', idsArray);
@@ -1993,13 +2019,10 @@ function Admin() {
             <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">
               Precio por unidad para el revendedor (pesos ARS)
             </label>
-            <input
+            <InputPesos
               required
-              type="number"
-              min="0"
-              step="any"
               value={asignacion.precio}
-              onChange={(e) => setAsignacion({ ...asignacion, precio: e.target.value })}
+              onChange={(precio) => setAsignacion({ ...asignacion, precio })}
               className={claseInputModal + ' font-bold'}
             />
             <p className="text-[11px] font-medium text-gray-500 mt-1">
@@ -2120,6 +2143,76 @@ function Admin() {
         </div>
       )}
 
+      {/* MODAL: BORRAR DEL STOCK */}
+      {borrado && (
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto">
+            <h2 className="text-xl font-bold text-gray-800">Borrar del stock</h2>
+            <p className="text-sm font-semibold text-gray-600 mt-1 break-words">{nombreItem(borrado.item, borrado.tabla)}</p>
+
+            <label className="text-xs font-bold text-gray-600 mt-4 mb-1 block">
+              Cuantas unidades queres borrar? (hay {borrado.item.cantidad} en stock)
+            </label>
+            <div className="flex items-stretch gap-2">
+              <button
+                type="button"
+                aria-label="Restar una unidad"
+                onClick={() => setBorrado({ ...borrado, cantidad: Math.max(1, cantidadBorrado - 1) })}
+                disabled={cantidadBorrado <= 1}
+                className="w-12 shrink-0 bg-gray-200 text-gray-800 rounded-lg font-black text-xl hover:bg-gray-300 disabled:opacity-40"
+              >
+                -
+              </button>
+              <input
+                type="number"
+                min="1"
+                max={borrado.item.cantidad}
+                value={borrado.cantidad}
+                onChange={(e) => setBorrado({ ...borrado, cantidad: e.target.value })}
+                onBlur={() => setBorrado({ ...borrado, cantidad: cantidadBorrado })}
+                className="flex-1 min-w-0 border border-gray-300 rounded-lg p-2.5 text-center text-lg font-black text-gray-800 outline-none focus:border-blue-500"
+              />
+              <button
+                type="button"
+                aria-label="Sumar una unidad"
+                onClick={() => setBorrado({ ...borrado, cantidad: Math.min(borrado.item.cantidad, cantidadBorrado + 1) })}
+                disabled={cantidadBorrado >= borrado.item.cantidad}
+                className="w-12 shrink-0 bg-gray-200 text-gray-800 rounded-lg font-black text-xl hover:bg-gray-300 disabled:opacity-40"
+              >
+                +
+              </button>
+            </div>
+            {borrado.item.cantidad > 1 && (
+              <button
+                type="button"
+                onClick={() => setBorrado({ ...borrado, cantidad: borrado.item.cantidad })}
+                className="mt-2 text-xs font-bold text-blue-600 hover:underline py-1"
+              >
+                Todas ({borrado.item.cantidad})
+              </button>
+            )}
+
+            <p className="mt-3 bg-red-50 border border-red-100 rounded-lg p-3 text-xs font-semibold text-red-700">
+              Se van a borrar {cantidadBorrado} unidad(es) de forma definitiva. Esta accion no se puede deshacer.
+            </p>
+
+            <div className="flex gap-3 mt-4">
+              <button type="button" onClick={() => setBorrado(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={guardando}
+                onClick={conBloqueo(confirmarBorradoElegido)}
+                className="disabled:opacity-60 flex-1 bg-red-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-red-700 transition"
+              >
+                Borrar {cantidadBorrado}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* DIALOGO DE CONFIRMACION */}
       {dialogo && (
         <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
@@ -2212,12 +2305,9 @@ function Admin() {
                 <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">
                   Precio final del celular (pesos ARS por unidad)
                 </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
+                <InputPesos
                   value={venta.precio}
-                  onChange={(e) => setVenta({ ...venta, precio: e.target.value })}
+                  onChange={(precio) => setVenta({ ...venta, precio })}
                   className={claseInputModal + ' font-bold'}
                 />
                 <p className="text-[11px] font-medium text-gray-500 mt-1">
@@ -2297,12 +2387,9 @@ function Admin() {
                           </select>
                         </div>
                         {x.modo === 'especial' && (
-                          <input
-                            type="number"
-                            min="0"
-                            step="any"
+                          <InputPesos
                             value={x.precio}
-                            onChange={(e) => cambiarAccesorioVenta(x.id, { precio: e.target.value })}
+                            onChange={(precio) => cambiarAccesorioVenta(x.id, { precio })}
                             placeholder="Precio especial en pesos por unidad"
                             aria-label="Precio especial en pesos por unidad"
                             className="mt-2 border border-gray-300 rounded-lg p-2 w-full min-w-0 bg-white text-sm font-bold text-gray-800 outline-none focus:border-blue-500"
@@ -2433,14 +2520,14 @@ function Admin() {
               </div>
               <div className="col-span-2 bg-blue-50 p-3 rounded-lg border border-blue-100">
                 <label className="text-xs font-bold text-blue-800 mb-1 block">Precio tomado (Pesos ARS)</label>
-                <input required name="precio_ars" value={formPermuta.precio_ars} onChange={handleChangePermuta} type="number" min="0" placeholder="Ej: 450000" className="border border-blue-200 p-2.5 rounded-lg w-full bg-white outline-none font-bold text-gray-800" />
+                <InputPesos required name="precio_ars" value={formPermuta.precio_ars} onChange={(v) => setFormPermuta({ ...formPermuta, precio_ars: v })} placeholder="Ej: 450.000" className="border border-blue-200 p-2.5 rounded-lg w-full bg-white outline-none font-bold text-gray-800" />
                 <p className="text-xs text-blue-600 mt-2 font-bold text-right">
                   Costo: USD {formPermuta.precio_ars && cot ? (formPermuta.precio_ars / cot).toFixed(2) : '0.00'}
                 </p>
               </div>
               <div className="col-span-2 bg-green-50 p-3 rounded-lg border border-green-100">
                 <label className="text-xs font-bold text-green-800 mb-1 block">Precio de venta (Pesos ARS) - opcional</label>
-                <input name="precio_venta_ars" value={formPermuta.precio_venta_ars} onChange={handleChangePermuta} type="number" min="0" placeholder="Vacio = igual al costo" className="border border-green-200 p-2.5 rounded-lg w-full bg-white outline-none font-bold text-gray-800" />
+                <InputPesos name="precio_venta_ars" value={formPermuta.precio_venta_ars} onChange={(v) => setFormPermuta({ ...formPermuta, precio_venta_ars: v })} placeholder="Vacio = igual al costo" className="border border-green-200 p-2.5 rounded-lg w-full bg-white outline-none font-bold text-gray-800" />
                 <p className="text-xs text-green-700 mt-2 font-bold text-right">
                   Venta: USD{' '}
                   {formPermuta.precio_venta_ars && cot
