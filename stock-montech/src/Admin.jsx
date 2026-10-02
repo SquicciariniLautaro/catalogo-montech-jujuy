@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, Fragment } from 'react';
 import { supabase } from './supabase';
 import toast from 'react-hot-toast';
-import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 
 const COLORES = [
   'Negro',
@@ -38,7 +38,10 @@ const PALETA = [
 
 const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 const VENTAS_POR_PAGINA = 10;
-const ALTO_MENU = 140;
+
+// Colores del grafico por mes: paleta categorica en orden fijo
+const COLORES_GRAFICO = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300'];
+const ALTO_MENU = 190;
 
 // Columnas compartidas por el encabezado y las filas del stock en escritorio
 const COLUMNAS_STOCK = 'md:grid md:grid-cols-[minmax(0,1fr)_17rem_8rem] md:gap-4 md:items-center';
@@ -264,6 +267,48 @@ function CirculoColor({ color, soloCirculo = false }) {
   );
 }
 
+// Desplegable de colores para los formularios de edicion. "Otro" permite escribir un color o
+// diseno que no esta en la lista, asi no se pierden los valores personalizados.
+function SelectorColor({ etiqueta, valor, onCambio }) {
+  const actual = String(valor || '').trim();
+  const canonico = COLORES.find((c) => c.toLowerCase() === actual.toLowerCase());
+  const [otro, setOtro] = useState(actual !== '' && !canonico);
+
+  const elegir = (e) => {
+    if (e.target.value === 'OTRO') {
+      setOtro(true);
+      return;
+    }
+    setOtro(false);
+    onCambio(e.target.value);
+  };
+
+  return (
+    <div className="min-w-0">
+      <label className="block min-w-0 text-[10px] font-bold text-gray-500 uppercase tracking-wide">
+        {etiqueta}
+        <select className={claseInputEdicion} value={otro ? 'OTRO' : canonico || ''} onChange={elegir}>
+          <option value="" disabled>Elegir color...</option>
+          {COLORES.map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
+          <option value="OTRO">Otro (escribir)</option>
+        </select>
+      </label>
+      {otro && (
+        <input
+          type="text"
+          value={valor || ''}
+          onChange={(e) => onCambio(e.target.value)}
+          placeholder="Escribi el color o diseno"
+          aria-label={etiqueta + ' personalizado'}
+          className={claseInputEdicion}
+        />
+      )}
+    </div>
+  );
+}
+
 // Campo con etiqueta para los formularios de edicion
 function Campo({ etiqueta, className = '', children }) {
   return (
@@ -419,6 +464,7 @@ function Admin() {
   const [stockCelulares, setStockCelulares] = useState([]);
   const [stockAccesorios, setStockAccesorios] = useState([]);
   const [ventasGlobales, setVentasGlobales] = useState([]);
+  const [enRevendedor, setEnRevendedor] = useState([]); // unidades entregadas a consignacion
   const [cargando, setCargando] = useState(true);
 
   const estadoInicialCelular = { modelo: '', capacidad: '', color: '', bateria: '', costo_usd: '', precio_usd: '', detalles: '', cantidad: 1 };
@@ -440,6 +486,8 @@ function Admin() {
   const [menu, setMenu] = useState(null); // { key, item, tabla, top, right }
   const [venta, setVenta] = useState(null); // { item, tabla, cantidad, mayorista }
   const [busquedaStock, setBusquedaStock] = useState('');
+  const [asignacion, setAsignacion] = useState(null); // { item, tabla, nombre, cantidad, precio }
+  const [resolucion, setResolucion] = useState(null); // { lote, destino, cantidad }
   const [dialogo, setDialogo] = useState(null); // { titulo, texto, botones: [{ etiqueta, clase, accion }] }
   const [guardando, setGuardando] = useState(false);
   const ocupado = useRef(false);
@@ -489,15 +537,17 @@ function Admin() {
     if (mostrarLoader) setCargando(true);
 
     // El orden final (de menor a mayor precio, igual que el catalogo publico) se aplica al agrupar
-    const [config, celDisponibles, accDisponibles, celVendidos, accVendidos] = await Promise.all([
+    const [config, celDisponibles, accDisponibles, celVendidos, accVendidos, celRevendedor, accRevendedor] = await Promise.all([
       supabase.from('configuracion').select('*').eq('id', 1).single(),
       traerTodo(() => supabase.from('celulares').select('*').eq('estado', 'disponible').order('modelo', { ascending: true }).order('id')),
       traerTodo(() => supabase.from('accesorios').select('*').eq('estado', 'disponible').order('tipo', { ascending: true }).order('id')),
       traerTodo(() => supabase.from('celulares').select('*').eq('estado', 'vendido').order('id')),
       traerTodo(() => supabase.from('accesorios').select('*').eq('estado', 'vendido').order('id')),
+      traerTodo(() => supabase.from('celulares').select('*').eq('estado', 'revendedor').order('id')),
+      traerTodo(() => supabase.from('accesorios').select('*').eq('estado', 'revendedor').order('id')),
     ]);
 
-    const fallo = [config, celDisponibles, accDisponibles, celVendidos, accVendidos].find((r) => r.error);
+    const fallo = [config, celDisponibles, accDisponibles, celVendidos, accVendidos, celRevendedor, accRevendedor].find((r) => r.error);
     if (fallo) toast.error('Error al cargar datos: ' + fallo.error.message);
 
     if (config.data) {
@@ -515,6 +565,11 @@ function Admin() {
     ];
     ventasUnificadas.sort((a, b) => new Date(b.fecha_venta) - new Date(a.fecha_venta));
     setVentasGlobales(ventasUnificadas);
+
+    setEnRevendedor([
+      ...(celRevendedor.data || []).map((u) => ({ ...u, tabla: 'celulares' })),
+      ...(accRevendedor.data || []).map((u) => ({ ...u, tabla: 'accesorios' })),
+    ]);
 
     if (mostrarLoader) setCargando(false);
   }
@@ -724,6 +779,113 @@ function Admin() {
     cargarDatos(false);
   }
 
+  // ---------- Revendedores (consignacion) ----------
+  const nombreItem = (item, tabla) =>
+    (tabla === 'celulares'
+      ? item.modelo + ' ' + (item.capacidad || '') + ' - Bateria ' + item.bateria + '%'
+      : item.tipo + ' - ' + item.modelo) + (item.color ? ' - ' + item.color : '');
+
+  // Lo que debe el revendedor por una unidad: el precio acordado al entregarla
+  // (si no se cargo, el precio de venta del equipo)
+  const precioAcordado = (u) =>
+    u.precio_revendedor === null || u.precio_revendedor === undefined ? Number(u.precio_usd) || 0 : Number(u.precio_revendedor) || 0;
+
+  const diaEntrega = (u) => (u.fecha_revendedor ? new Date(u.fecha_revendedor).toLocaleDateString('es-AR') : '');
+
+  const diasDesde = (fechaISO) => Math.max(0, Math.floor((Date.now() - new Date(fechaISO).getTime()) / 86400000));
+
+  // Agrupa las unidades en consignacion por revendedor y, dentro de cada uno, por lote
+  // (mismo equipo, mismo precio acordado y mismo dia de entrega)
+  const gruposRevendedor = Object.values(
+    enRevendedor.reduce((acc, u) => {
+      const nombre = String(u.revendedor || '').trim() || 'Sin nombre';
+      const k = normalizar(nombre);
+      const precio = precioAcordado(u);
+      if (!acc[k]) acc[k] = { nombre, unidades: 0, totalUsd: 0, lotes: {} };
+      acc[k].unidades += 1;
+      acc[k].totalUsd += precio;
+      const kl = [u.tabla, u.tabla === 'celulares' ? claveCelular(u) : claveAccesorio(u), precio, diaEntrega(u)].join('|');
+      if (!acc[k].lotes[kl]) acc[k].lotes[kl] = { ...u, cantidad: 0, ids: [], precioUnidad: precio, precioTotal: 0 };
+      acc[k].lotes[kl].cantidad += 1;
+      acc[k].lotes[kl].ids.push(u.id);
+      acc[k].lotes[kl].precioTotal += precio;
+      return acc;
+    }, {})
+  )
+    .map((g) => ({ ...g, lotes: Object.values(g.lotes) }))
+    .sort((a, b) => comparar(a.nombre, b.nombre));
+
+  const totalEnLaCalleUsd = gruposRevendedor.reduce((acc, g) => acc + g.totalUsd, 0);
+
+  const cantidadAsignacion = asignacion
+    ? Math.min(asignacion.item.cantidad, Math.max(1, parseInt(asignacion.cantidad) || 1))
+    : 0;
+
+  async function asignarRevendedor() {
+    const { item, tabla } = asignacion;
+    const escrito = asignacion.nombre.trim();
+    if (!escrito) {
+      toast.error('Indica el nombre del revendedor');
+      return;
+    }
+    // Si ya existe un revendedor con ese nombre, se usa la misma escritura para no duplicarlo
+    const existente = gruposRevendedor.find((g) => normalizar(g.nombre) === normalizar(escrito));
+    const nombre = existente ? existente.nombre : escrito;
+    const precio = parseFloat(asignacion.precio);
+    if (!(precio >= 0)) {
+      toast.error('Indica el precio acordado con el revendedor');
+      return;
+    }
+    const ids = item.ids.slice(0, cantidadAsignacion);
+    setAsignacion(null);
+    const { error } = await supabase
+      .from(tabla)
+      .update({
+        estado: 'revendedor',
+        revendedor: nombre,
+        precio_revendedor: redondear(precio),
+        fecha_revendedor: new Date().toISOString(),
+      })
+      .in('id', ids);
+    if (error) {
+      toast.error('Error al asignar: ' + error.message);
+      return;
+    }
+    toast.success(ids.length + ' unidad(es) asignada(s) a ' + nombre);
+    cargarDatos(false);
+  }
+
+  // El revendedor rinde la plata (pasa a vendido, al precio acordado) o devuelve el equipo
+  // (vuelve al stock con su precio de venta original)
+  async function resolverRevendedor(ids, tabla, destino, precioUnidad) {
+    const cambios =
+      destino === 'vendido'
+        ? { estado: 'vendido', fecha_venta: new Date().toISOString(), precio_usd: precioUnidad }
+        : { estado: 'disponible', revendedor: null, precio_revendedor: null, fecha_revendedor: null };
+    const { error } = await supabase.from(tabla).update(cambios).in('id', ids);
+    if (error) {
+      toast.error('Error al actualizar: ' + error.message);
+      return;
+    }
+    toast.success(
+      ids.length + (destino === 'vendido' ? ' unidad(es) marcada(s) como vendida(s)' : ' unidad(es) devuelta(s) al stock')
+    );
+    cargarDatos(false);
+  }
+
+  const confirmarResolucion = (lote, destino) => setResolucion({ lote, destino, cantidad: 1 });
+
+  const cantidadResolucion = resolucion
+    ? Math.min(resolucion.lote.cantidad, Math.max(1, parseInt(resolucion.cantidad) || 1))
+    : 0;
+
+  async function ejecutarResolucion() {
+    const { lote, destino } = resolucion;
+    const ids = lote.ids.slice(0, cantidadResolucion);
+    setResolucion(null);
+    await resolverRevendedor(ids, lote.tabla, destino, lote.precioUnidad);
+  }
+
   // ---------- Borrado ----------
   const confirmarBorrado = (item, tabla) => {
     const nombre = tabla === 'celulares' ? item.modelo + ' ' + (item.capacidad || '') : item.tipo + ' - ' + item.modelo;
@@ -886,15 +1048,20 @@ function Admin() {
       const ventasMes = ventasGlobales.filter((v) => obtenerMesAnio(v.fecha_venta) === mes);
       const ganancia = ventasMes.reduce((acc, c) => acc + (c.precio_usd - c.costo_usd), 0);
       const [, month] = mes.split('-');
-      return { name: MESES[parseInt(month) - 1].slice(0, 3), Ganancia: redondear(ganancia) };
-    });
+      return { name: MESES[parseInt(month) - 1] + ' ' + mes.slice(0, 4), Ganancia: redondear(ganancia) };
+    })
+    // Una torta no puede dibujar valores negativos: un mes con perdida ocupa 0 en el grafico
+    // pero conserva su valor real en la lista
+    .map((d, i) => ({ ...d, valor: Math.max(0, d.Ganancia), color: COLORES_GRAFICO[i % COLORES_GRAFICO.length] }));
+  const totalGrafico = datosGrafico.reduce((acc, d) => acc + d.Ganancia, 0);
+  const totalTorta = datosGrafico.reduce((acc, d) => acc + d.valor, 0);
 
   if (cargando) {
     return <div className="min-h-screen flex items-center justify-center font-bold text-gray-500 bg-gray-50">Cargando...</div>;
   }
 
   const claseTab = (tab) =>
-    'flex-1 md:flex-none py-3 px-6 text-sm font-bold rounded-t-lg transition ' +
+    'flex-1 md:flex-none py-3 px-1.5 md:px-6 text-xs sm:text-sm font-bold rounded-t-lg transition ' +
     (activeTab === tab ? 'bg-white border-t border-l border-r border-gray-200 text-blue-600' : 'text-gray-500 hover:bg-gray-100');
 
   const claseBotonAgregar = 'flex-1 bg-blue-600 text-white py-3 md:py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition text-sm disabled:opacity-60';
@@ -965,6 +1132,9 @@ function Admin() {
         <div className="flex gap-2 border-b border-gray-200">
           <button onClick={() => cambiarTab('celulares')} className={claseTab('celulares')}>Celulares</button>
           <button onClick={() => cambiarTab('accesorios')} className={claseTab('accesorios')}>Accesorios</button>
+          <button onClick={() => cambiarTab('revendedores')} className={claseTab('revendedores')}>
+            Revendedores{enRevendedor.length > 0 ? ' (' + enRevendedor.length + ')' : ''}
+          </button>
         </div>
 
         {/* ===================== TAB CELULARES ===================== */}
@@ -1018,9 +1188,6 @@ function Admin() {
                         <Campo etiqueta="Bateria %">
                           <input className={claseInputEdicion} name="bateria" type="number" min="0" max="100" value={formEdicionCelular.bateria ?? ''} onChange={handleChangeEdicionCelular} />
                         </Campo>
-                        <Campo etiqueta="Color">
-                          <input className={claseInputEdicion} name="color" type="text" list="lista-colores" value={formEdicionCelular.color || ''} onChange={handleChangeEdicionCelular} placeholder="Elegir o escribir" />
-                        </Campo>
                         <Campo etiqueta="Costo USD">
                           <input className={claseInputEdicion} name="costo_usd" type="number" min="0" step="any" value={formEdicionCelular.costo_usd ?? ''} onChange={handleChangeEdicionCelular} />
                         </Campo>
@@ -1030,6 +1197,11 @@ function Admin() {
                         <Campo etiqueta="Detalles" className="col-span-2">
                           <input className={claseInputEdicion} name="detalles" value={formEdicionCelular.detalles || ''} onChange={handleChangeEdicionCelular} />
                         </Campo>
+                        <SelectorColor
+                          etiqueta="Color"
+                          valor={formEdicionCelular.color}
+                          onCambio={(color) => setFormEdicionCelular({ ...formEdicionCelular, color })}
+                        />
                       </div>
                       <AccionesEdicion
                         cantidad={celu.cantidad}
@@ -1107,9 +1279,6 @@ function Admin() {
                         <Campo etiqueta="Modelo">
                           <input className={claseInputEdicion} name="modelo" value={formEdicionAccesorio.modelo || ''} onChange={handleChangeEdicionAccesorio} />
                         </Campo>
-                        <Campo etiqueta="Color / Diseno">
-                          <input className={claseInputEdicion} name="color" type="text" list="lista-colores" value={formEdicionAccesorio.color || ''} onChange={handleChangeEdicionAccesorio} placeholder="Elegir o escribir" />
-                        </Campo>
                         <Campo etiqueta="Costo USD">
                           <input className={claseInputEdicion} name="costo_usd" type="number" min="0" step="any" value={formEdicionAccesorio.costo_usd ?? ''} onChange={handleChangeEdicionAccesorio} />
                         </Campo>
@@ -1119,6 +1288,11 @@ function Admin() {
                         <Campo etiqueta="Detalles">
                           <input className={claseInputEdicion} name="detalles" value={formEdicionAccesorio.detalles || ''} onChange={handleChangeEdicionAccesorio} />
                         </Campo>
+                        <SelectorColor
+                          etiqueta="Color / Diseno"
+                          valor={formEdicionAccesorio.color}
+                          onCambio={(color) => setFormEdicionAccesorio({ ...formEdicionAccesorio, color })}
+                        />
                       </div>
                       <AccionesEdicion
                         cantidad={acc.cantidad}
@@ -1146,6 +1320,100 @@ function Admin() {
                 </p>
               )}
             </div>
+          </div>
+        )}
+
+        {/* ===================== TAB REVENDEDORES ===================== */}
+        {activeTab === 'revendedores' && (
+          <div className="space-y-4 md:space-y-6">
+            <div className="bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 grid grid-cols-2 md:grid-cols-3 gap-4">
+              <div className="border-l-4 border-gray-400 pl-3 min-w-0">
+                <p className="text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1">Unidades en la calle</p>
+                <p className="font-black text-lg md:text-2xl text-gray-800">{enRevendedor.length}</p>
+              </div>
+              <div className="border-l-4 border-purple-500 pl-3 min-w-0">
+                <p className="text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1">Total en USD</p>
+                <p className="font-black text-lg md:text-2xl text-purple-700 break-words">$ {fmt(totalEnLaCalleUsd)}</p>
+              </div>
+              <div className="border-l-4 border-green-500 pl-3 min-w-0 col-span-2 md:col-span-1">
+                <p className="text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1">Total en ARS</p>
+                <p className="font-black text-lg md:text-2xl text-green-600 break-words">$ {fmt(Math.round(totalEnLaCalleUsd * cot))}</p>
+              </div>
+              <p className="col-span-2 md:col-span-3 text-[11px] text-gray-400">
+                Equipos entregados a consignacion. No figuran en el catalogo publico ni en el stock disponible. Para sumar uno, usa Opciones y luego "A revendedor" en el stock.
+              </p>
+            </div>
+
+            {gruposRevendedor.length === 0 && (
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-200">
+                <p className="text-center p-8 text-gray-500">No hay equipos asignados a revendedores.</p>
+              </div>
+            )}
+
+            {gruposRevendedor.map((g) => (
+              <div key={g.nombre} className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+                <div className="px-3 md:px-4 py-3 border-b border-gray-200 bg-purple-50 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+                  <div className="min-w-0">
+                    <h2 className="text-lg font-bold text-gray-900 break-words">{g.nombre}</h2>
+                    <p className="text-xs font-semibold text-gray-500">{g.unidades} unidad(es) en su poder</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-base md:text-lg font-black text-purple-700">USD {fmt(g.totalUsd)}</p>
+                    <p className="text-xs font-bold text-gray-600">ARS $ {fmt(Math.round(g.totalUsd * cot))}</p>
+                  </div>
+                </div>
+                <div className="divide-y divide-gray-100">
+                  {g.lotes.map((lote) => (
+                    <div key={lote.tabla + '-' + lote.ids[0]} className="p-3 md:px-4 flex flex-col gap-2 md:flex-row md:items-center md:gap-4">
+                      <div className="min-w-0 md:flex-1">
+                        <div className="flex items-start gap-2">
+                          <span className="shrink-0 bg-purple-600 text-white px-2 py-0.5 rounded text-xs font-bold shadow-sm">{lote.cantidad} u.</span>
+                          <span className="min-w-0 break-words font-bold text-gray-900 text-sm leading-tight">
+                            {lote.tabla === 'celulares' ? lote.modelo + ' ' + (lote.capacidad || '') : lote.tipo + ' - ' + lote.modelo}
+                          </span>
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-gray-600">
+                          {lote.color && (
+                            <span className="inline-flex items-center gap-1">
+                              <CirculoColor color={lote.color} soloCirculo />
+                              {lote.color}
+                            </span>
+                          )}
+                          {lote.tabla === 'celulares' && <span>Bateria {lote.bateria}%</span>}
+                          {lote.detalles && <span className="break-words min-w-0">{lote.detalles}</span>}
+                        </div>
+                        {lote.fecha_revendedor && (
+                          <p className="mt-1 text-[11px] font-semibold text-purple-700">
+                            Entregado el {diaEntrega(lote)} (hace {diasDesde(lote.fecha_revendedor)} dia(s))
+                          </p>
+                        )}
+                      </div>
+                      <div className="text-sm font-bold text-gray-800 md:text-right md:w-44">
+                        USD {fmt(lote.precioTotal)}
+                        <span className="block text-[11px] font-semibold text-gray-500">ARS $ {fmt(Math.round(lote.precioTotal * cot))}</span>
+                        {lote.cantidad > 1 && (
+                          <span className="block text-[11px] font-semibold text-gray-400">USD {fmt(lote.precioUnidad)} c/u</span>
+                        )}
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => confirmarResolucion(lote, 'vendido')}
+                          className="flex-1 md:flex-none bg-green-600 text-white px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-green-700 transition"
+                        >
+                          Pago (vendido)
+                        </button>
+                        <button
+                          onClick={() => confirmarResolucion(lote, 'disponible')}
+                          className="flex-1 md:flex-none bg-gray-200 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-gray-300 transition"
+                        >
+                          Devolvio
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
@@ -1218,30 +1486,70 @@ function Admin() {
             </div>
           )}
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
             {datosGrafico.length > 0 && (
               <div className="min-w-0 bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200">
-                <h3 className="text-xs md:text-sm font-bold text-gray-500 mb-4 uppercase tracking-wider text-center">
-                  Ganancias Unificadas (Ultimos 6 Meses, USD)
+                <h3 className="text-xs md:text-sm font-bold text-gray-500 mb-3 uppercase tracking-wider text-center">
+                  Ganancia por mes (ultimos 6 meses, USD)
                 </h3>
-                <div className="h-56 w-full">
+                <div className="relative h-52 w-full">
                   <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={datosGrafico}>
-                      <XAxis dataKey="name" tick={{ fontSize: 12, fill: '#6b7280' }} axisLine={false} tickLine={false} />
-                      <Tooltip cursor={{ fill: '#f3f4f6' }} contentStyle={{ borderRadius: '8px', border: 'none' }} />
-                      <Bar dataKey="Ganancia" fill="#2563eb" radius={[4, 4, 0, 0]} />
-                    </BarChart>
+                    <PieChart>
+                      <Pie
+                        data={datosGrafico}
+                        dataKey="valor"
+                        nameKey="name"
+                        innerRadius="58%"
+                        outerRadius="92%"
+                        paddingAngle={datosGrafico.length > 1 ? 2 : 0}
+                        stroke="#ffffff"
+                        strokeWidth={2}
+                      >
+                        {datosGrafico.map((d) => (
+                          <Cell key={d.name} fill={d.color} />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        formatter={(valor, nombre, entrada) => ['USD ' + fmt(entrada.payload.Ganancia), nombre]}
+                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.12)' }}
+                      />
+                    </PieChart>
                   </ResponsiveContainer>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Total</span>
+                    <span className="text-lg font-black text-gray-800">$ {fmt(totalGrafico)}</span>
+                  </div>
                 </div>
+                <ul className="mt-4 space-y-1.5">
+                  {datosGrafico.map((d) => (
+                    <li key={d.name} className="flex items-center justify-between gap-2 text-xs">
+                      <span className="flex items-center gap-2 min-w-0 font-semibold text-gray-700">
+                        <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: d.color }} />
+                        {d.name}
+                      </span>
+                      <span className="font-bold text-gray-900 whitespace-nowrap">
+                        USD {fmt(d.Ganancia)}{' '}
+                        <span className="font-semibold text-gray-400">
+                          ({totalTorta > 0 ? Math.round((d.valor / totalTorta) * 100) : 0}%)
+                        </span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
 
-            <div className="min-w-0 bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex flex-col h-full">
-              <div className="flex-grow divide-y divide-gray-100">
+            <div
+              className={
+                'min-w-0 bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex flex-col ' +
+                (datosGrafico.length > 0 ? 'lg:col-span-2' : 'lg:col-span-3')
+              }
+            >
+              <div className="flex-grow grid grid-cols-1 sm:grid-cols-2 gap-px bg-gray-100 content-start">
                 {ventasPaginadas.map((item) => {
                   const ganancia = item.precio_usd - item.costo_usd;
                   return (
-                    <div key={item.categoria + '-' + item.id} className="p-3 md:p-4 flex items-center justify-between gap-3 hover:bg-gray-50 transition">
+                    <div key={item.categoria + '-' + item.id} className="p-3 bg-white flex items-center justify-between gap-3 hover:bg-gray-50 transition">
                       <div className="min-w-0">
                         <span className="text-[10px] uppercase font-bold text-gray-400 block mb-0.5">
                           {item.categoria} - {item.fecha_venta ? new Date(item.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha'}
@@ -1270,7 +1578,7 @@ function Admin() {
                     </div>
                   );
                 })}
-                {ventasFiltradas.length === 0 && <p className="text-center p-8 text-gray-500">No hay ventas registradas.</p>}
+                {ventasFiltradas.length === 0 && <p className="sm:col-span-2 bg-white text-center p-8 text-gray-500">No hay ventas registradas.</p>}
               </div>
               {totalPaginas > 1 && (
                 <div className="bg-gray-50 p-3 md:p-4 border-t border-gray-200 flex justify-between items-center gap-2 mt-auto">
@@ -1343,6 +1651,16 @@ function Admin() {
                 onClick={() => {
                   const { item, tabla } = menu;
                   setMenu(null);
+                  setAsignacion({ item, tabla, nombre: '', cantidad: 1, precio: item.precio_usd });
+                }}
+                className="px-4 py-3 text-sm font-bold text-purple-700 bg-white hover:bg-purple-50 text-left border-b border-gray-50"
+              >
+                A revendedor
+              </button>
+              <button
+                onClick={() => {
+                  const { item, tabla } = menu;
+                  setMenu(null);
                   confirmarBorrado(item, tabla);
                 }}
                 className="px-4 py-3 text-sm font-bold text-red-500 bg-white hover:bg-red-50 text-left"
@@ -1352,6 +1670,189 @@ function Admin() {
             </div>
           </div>
         </Fragment>
+      )}
+
+      {/* MODAL: ASIGNAR A REVENDEDOR */}
+      {asignacion && (
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <form
+            onSubmit={conBloqueo(asignarRevendedor)}
+            autoComplete="off"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto"
+          >
+            <h2 className="text-xl font-bold text-gray-800">Asignar a revendedor</h2>
+            <p className="text-sm font-semibold text-gray-600 mt-1 break-words">{nombreItem(asignacion.item, asignacion.tabla)}</p>
+
+            <label className="text-xs font-bold text-gray-600 mt-4 mb-1 block">Nombre del revendedor</label>
+            <input
+              required
+              autoFocus
+              type="text"
+              list="lista-revendedores"
+              value={asignacion.nombre}
+              onChange={(e) => setAsignacion({ ...asignacion, nombre: e.target.value })}
+              placeholder="Coloque nombre del revendedor"
+              className={claseInputModal}
+            />
+            <datalist id="lista-revendedores">
+              {gruposRevendedor.map((g) => (
+                <option key={g.nombre} value={g.nombre} />
+              ))}
+            </datalist>
+
+            {asignacion.item.cantidad > 1 && (
+              <Fragment>
+                <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">
+                  Cuantas unidades le entregas? (hay {asignacion.item.cantidad} en stock)
+                </label>
+                <div className="flex items-stretch gap-2">
+                  <input
+                    type="number"
+                    min="1"
+                    max={asignacion.item.cantidad}
+                    value={asignacion.cantidad}
+                    onChange={(e) => setAsignacion({ ...asignacion, cantidad: e.target.value })}
+                    onBlur={() => setAsignacion({ ...asignacion, cantidad: cantidadAsignacion })}
+                    className="flex-1 min-w-0 border border-gray-300 rounded-lg p-2.5 text-center text-lg font-black text-gray-800 outline-none focus:border-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setAsignacion({ ...asignacion, cantidad: asignacion.item.cantidad })}
+                    className="shrink-0 bg-gray-200 text-gray-800 px-3 rounded-lg text-xs font-bold hover:bg-gray-300"
+                  >
+                    Todas
+                  </button>
+                </div>
+              </Fragment>
+            )}
+
+            <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">
+              Precio para el revendedor (USD por unidad)
+            </label>
+            <input
+              required
+              type="number"
+              min="0"
+              step="any"
+              value={asignacion.precio}
+              onChange={(e) => setAsignacion({ ...asignacion, precio: e.target.value })}
+              className={claseInputModal + ' font-bold'}
+            />
+            <p className="text-[11px] font-medium text-gray-500 mt-1">
+              Precio de venta al publico: USD {fmt(asignacion.item.precio_usd)}. Cambialo si al revendedor se lo dejas a otro precio.
+            </p>
+
+            <div className="mt-3 bg-purple-50 border border-purple-100 rounded-lg p-3">
+              <div className="flex justify-between gap-2 text-base font-black text-purple-800">
+                <span>Queda debiendo ({cantidadAsignacion} u.)</span>
+                <span>USD {fmt((Number(asignacion.precio) || 0) * cantidadAsignacion)}</span>
+              </div>
+              <p className="text-right text-xs font-bold text-gray-500 mt-0.5">
+                ARS $ {fmt(Math.round((Number(asignacion.precio) || 0) * cantidadAsignacion * cot))}
+              </p>
+              <p className="text-[11px] font-medium text-purple-700 mt-2">
+                El equipo sale del stock y del catalogo publico, pero no se cuenta como vendido hasta que el revendedor pague.
+              </p>
+            </div>
+
+            <div className="flex gap-3 mt-4">
+              <button type="button" onClick={() => setAsignacion(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
+                Cancelar
+              </button>
+              <button type="submit" disabled={guardando} className="disabled:opacity-60 flex-1 bg-purple-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-purple-700 transition">
+                Asignar
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* MODAL: EL REVENDEDOR PAGA O DEVUELVE */}
+      {resolucion && (
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto">
+            <h2 className="text-xl font-bold text-gray-800">
+              {resolucion.destino === 'vendido' ? 'El revendedor pago' : 'El revendedor devolvio'}
+            </h2>
+            <p className="text-sm font-semibold text-gray-600 mt-1 break-words">
+              {resolucion.lote.revendedor}: {nombreItem(resolucion.lote, resolucion.lote.tabla)}
+            </p>
+
+            <label className="text-xs font-bold text-gray-600 mt-4 mb-1 block">
+              {resolucion.destino === 'vendido' ? 'Cuantas unidades pago?' : 'Cuantas unidades devolvio?'} (tiene {resolucion.lote.cantidad})
+            </label>
+            <div className="flex items-stretch gap-2">
+              <button
+                type="button"
+                aria-label="Restar una unidad"
+                onClick={() => setResolucion({ ...resolucion, cantidad: Math.max(1, cantidadResolucion - 1) })}
+                disabled={cantidadResolucion <= 1}
+                className="w-12 shrink-0 bg-gray-200 text-gray-800 rounded-lg font-black text-xl hover:bg-gray-300 disabled:opacity-40"
+              >
+                -
+              </button>
+              <input
+                type="number"
+                min="1"
+                max={resolucion.lote.cantidad}
+                value={resolucion.cantidad}
+                onChange={(e) => setResolucion({ ...resolucion, cantidad: e.target.value })}
+                onBlur={() => setResolucion({ ...resolucion, cantidad: cantidadResolucion })}
+                className="flex-1 min-w-0 border border-gray-300 rounded-lg p-2.5 text-center text-lg font-black text-gray-800 outline-none focus:border-blue-500"
+              />
+              <button
+                type="button"
+                aria-label="Sumar una unidad"
+                onClick={() => setResolucion({ ...resolucion, cantidad: Math.min(resolucion.lote.cantidad, cantidadResolucion + 1) })}
+                disabled={cantidadResolucion >= resolucion.lote.cantidad}
+                className="w-12 shrink-0 bg-gray-200 text-gray-800 rounded-lg font-black text-xl hover:bg-gray-300 disabled:opacity-40"
+              >
+                +
+              </button>
+            </div>
+            {resolucion.lote.cantidad > 1 && (
+              <button
+                type="button"
+                onClick={() => setResolucion({ ...resolucion, cantidad: resolucion.lote.cantidad })}
+                className="mt-2 text-xs font-bold text-blue-600 hover:underline py-1"
+              >
+                Todas ({resolucion.lote.cantidad})
+              </button>
+            )}
+
+            <div className="mt-3 bg-gray-50 border border-gray-200 rounded-lg p-3">
+              <div className="flex justify-between gap-2 text-base font-black text-gray-800">
+                <span>{resolucion.destino === 'vendido' ? 'Cobras' : 'Deja de deber'} ({cantidadResolucion} u.)</span>
+                <span>USD {fmt(resolucion.lote.precioUnidad * cantidadResolucion)}</span>
+              </div>
+              <p className="text-right text-xs font-bold text-gray-500 mt-0.5">
+                ARS $ {fmt(Math.round(resolucion.lote.precioUnidad * cantidadResolucion * cot))}
+              </p>
+              <p className="text-[11px] font-medium text-gray-500 mt-2">
+                {resolucion.destino === 'vendido'
+                  ? 'Pasa al historial de ventas con la fecha de hoy, al precio acordado.'
+                  : 'Vuelve al stock disponible con su precio de venta original.'}
+              </p>
+            </div>
+
+            <div className="flex gap-3 mt-4">
+              <button type="button" onClick={() => setResolucion(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={guardando}
+                onClick={conBloqueo(ejecutarResolucion)}
+                className={
+                  'disabled:opacity-60 flex-1 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm transition ' +
+                  (resolucion.destino === 'vendido' ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-700 hover:bg-gray-800')
+                }
+              >
+                Confirmar
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* DIALOGO DE CONFIRMACION */}
