@@ -29,8 +29,9 @@ async function traerTodo(armarConsulta) {
   }
 }
 
-// Redondea a 2 decimales
-const redondear = (n) => Math.round((Number(n) || 0) * 100) / 100;
+// Redondea a 4 decimales: los precios en USD admiten mas de 2 decimales para que
+// el precio en pesos pueda quedar en un numero redondo
+const redondear = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
 
 // Agrupa las unidades iguales en una sola fila. El precio NO forma parte de la clave:
 // se muestra el promedio ponderado del lote, igual que en el panel de administracion.
@@ -152,10 +153,15 @@ const armarFilasConSeparador = (lista, obtenerFamilia, obtenerEtiqueta, obtenerS
   return filas;
 };
 
+// Cantidad minima del mismo accesorio para que aplique el descuento mayorista
+const MINIMO_MAYORISTA = 2;
+
 function Catalogo() {
   const [celularesAgrupados, setCelularesAgrupados] = useState([]);
   const [accesoriosAgrupados, setAccesoriosAgrupados] = useState([]);
   const [cotizacion, setCotizacion] = useState(1250);
+  const [descuentoMayorista, setDescuentoMayorista] = useState(0);
+  const [cantidades, setCantidades] = useState({}); // cantidad elegida por accesorio
   const [cargando, setCargando] = useState(true);
   const [huboError, setHuboError] = useState(false);
   const [esAdmin, setEsAdmin] = useState(false);
@@ -179,6 +185,14 @@ function Catalogo() {
           .single();
 
         if (configData) setCotizacion(Number(configData.cotizacion_dolar) || 1250);
+
+        // El descuento mayorista se lee aparte: si no esta disponible, el catalogo funciona sin descuento
+        const { data: descuentoData } = await supabase
+          .from('configuracion')
+          .select('descuento_mayorista')
+          .eq('id', 1)
+          .maybeSingle();
+        if (descuentoData) setDescuentoMayorista(Number(descuentoData.descuento_mayorista) || 0);
 
         const { data: celularesData, error: errorCelulares } = await traerTodo(() =>
           supabase.from('catalogo_celulares').select('*').order('id')
@@ -268,12 +282,29 @@ function Catalogo() {
     return linkWsp(mensaje);
   };
 
-  const linkConsultaAccesorio = (acc, precioPesos) => {
-    const precio = Math.round(precioPesos).toLocaleString('es-AR');
+  // Precio de un accesorio segun la cantidad elegida: desde MINIMO_MAYORISTA unidades
+  // se aplica el descuento mayorista a cada unidad
+  const cotizarAccesorio = (acc) => {
+    const clave = claveAccesorio(acc);
+    const cantidad = Math.min(acc.cantidad, Math.max(1, cantidades[clave] || 1));
+    const aplica = descuentoMayorista > 0 && cantidad >= MINIMO_MAYORISTA;
+    const factor = aplica ? 1 - descuentoMayorista / 100 : 1;
+    const unitario = Math.round(Number(acc.precio_usd) * factor * cotizacion);
+    return { clave, cantidad, aplica, unitario, total: unitario * cantidad };
+  };
+
+  const cambiarCantidad = (clave, cantidad) => setCantidades({ ...cantidades, [clave]: cantidad });
+
+  const linkConsultaAccesorio = (acc, cotizado) => {
     const descripcion = armarDescripcion([limpiarTexto(acc.color), String(acc.detalles || '').trim()]);
+    const producto = 'el accesorio ' + acc.tipo + ' ' + acc.modelo + descripcion;
+    const unitario = cotizado.unitario.toLocaleString('es-AR');
     const mensaje =
-      'Hola Montech! Vi en tu catálogo el accesorio ' + acc.tipo + ' ' + acc.modelo +
-      descripcion + ' a $' + precio + '. ¿Tenés stock?';
+      cotizado.cantidad > 1
+        ? 'Hola Montech! Vi en tu catálogo ' + producto + '. Quiero ' + cotizado.cantidad + ' unidades a $' + unitario +
+          ' c/u' + (cotizado.aplica ? ' (precio mayorista, ' + descuentoMayorista + '% de descuento)' : '') +
+          ', total $' + cotizado.total.toLocaleString('es-AR') + '. ¿Tenés stock?'
+        : 'Hola Montech! Vi en tu catálogo ' + producto + ' a $' + unitario + '. ¿Tenés stock?';
     return linkWsp(mensaje);
   };
 
@@ -462,6 +493,11 @@ function Catalogo() {
       )}
 
       {/* TABLA ACCESORIOS */}
+      {tabActiva === 'accesorios' && descuentoMayorista > 0 && accesoriosAgrupados.length > 0 && (
+        <p className="mb-2 px-1 text-[11px] md:text-xs font-semibold text-green-700">
+          Precio mayorista: llevando {MINIMO_MAYORISTA} o mas unidades del mismo accesorio tenes {descuentoMayorista}% de descuento.
+        </p>
+      )}
       {tabActiva === 'accesorios' && (
         <div className="shadow-sm border border-gray-300 rounded-lg w-full overflow-hidden">
           <table className="w-full table-fixed border-collapse">
@@ -494,7 +530,8 @@ function Catalogo() {
                 }
 
                 const acc = fila.item;
-                const precioPesos = Number(acc.precio_usd) * cotizacion;
+                const cotizado = cotizarAccesorio(acc);
+                const claseBotonCantidad = 'w-6 h-6 md:w-7 md:h-7 text-sm font-black text-gray-700 hover:bg-gray-100 disabled:opacity-30';
                 return (
                   <tr
                     key={fila.key}
@@ -516,12 +553,60 @@ function Catalogo() {
                       {acc.detalles && (
                         <div className="text-[9px] md:text-[11px] text-gray-500 leading-tight mt-0.5">{acc.detalles}</div>
                       )}
+                      {acc.cantidad > 1 && (
+                        <div className="mt-1 inline-flex items-center border border-gray-300 rounded-md overflow-hidden bg-white align-middle">
+                          <button
+                            type="button"
+                            aria-label="Restar una unidad"
+                            disabled={cotizado.cantidad <= 1}
+                            onClick={() => cambiarCantidad(cotizado.clave, cotizado.cantidad - 1)}
+                            className={claseBotonCantidad}
+                          >
+                            -
+                          </button>
+                          <span className="min-w-7 px-1 text-center text-[11px] md:text-xs font-bold text-gray-800">x{cotizado.cantidad}</span>
+                          <button
+                            type="button"
+                            aria-label="Sumar una unidad"
+                            disabled={cotizado.cantidad >= acc.cantidad}
+                            onClick={() => cambiarCantidad(cotizado.clave, cotizado.cantidad + 1)}
+                            className={claseBotonCantidad}
+                          >
+                            +
+                          </button>
+                        </div>
+                      )}
+                      {[5, 10].filter((n) => n <= acc.cantidad).map((n) => (
+                        <button
+                          key={n}
+                          type="button"
+                          onClick={() => cambiarCantidad(cotizado.clave, n)}
+                          className={
+                            'mt-1 ml-1 h-6 md:h-7 px-1.5 rounded-md border text-[10px] md:text-xs font-bold align-middle ' +
+                            (cotizado.cantidad === n ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100')
+                          }
+                        >
+                          x{n}
+                        </button>
+                      ))}
                     </td>
-                    <td className="py-1 px-1 text-right font-bold text-gray-900 text-[11px] md:text-sm leading-tight whitespace-nowrap">
-                      $ {Math.round(precioPesos).toLocaleString('es-AR')}
+                    <td className="py-1 px-1 text-right leading-tight">
+                      <div className="font-bold text-gray-900 text-[11px] md:text-sm whitespace-nowrap">
+                        $ {cotizado.total.toLocaleString('es-AR')}
+                      </div>
+                      {cotizado.cantidad > 1 && (
+                        <div className="text-[9px] md:text-[11px] text-gray-500 whitespace-nowrap">
+                          {cotizado.cantidad} x $ {cotizado.unitario.toLocaleString('es-AR')}
+                        </div>
+                      )}
+                      {cotizado.aplica && (
+                        <div className="text-[9px] md:text-[11px] font-bold text-green-700 whitespace-nowrap">
+                          -{descuentoMayorista}% mayorista
+                        </div>
+                      )}
                     </td>
                     <td className="py-1 px-0.5 text-center">
-                      <BotonConsultar href={linkConsultaAccesorio(acc, precioPesos)} />
+                      <BotonConsultar href={linkConsultaAccesorio(acc, cotizado)} />
                     </td>
                   </tr>
                 );
