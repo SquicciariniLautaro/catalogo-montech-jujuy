@@ -572,6 +572,22 @@ function Admin() {
 
   const cot = Number(cotizacion) || 0;
 
+  // Cotizacion con la que se cerro una venta. Las ventas anteriores a que se guardara
+  // ese dato usan la cotizacion actual.
+  const cotizacionDe = (v) => Number(v.cotizacion_venta) || cot;
+
+  // Marca unidades como vendidas y guarda la cotizacion del dia, para que el historial en
+  // pesos no cambie cuando se mueve el dolar. Si la base todavia no tiene la columna
+  // cotizacion_venta, registra la venta igual sin ese dato.
+  async function marcarVendido(tabla, ids, cambios, fecha = new Date().toISOString()) {
+    const base = { estado: 'vendido', fecha_venta: fecha, ...cambios };
+    const resultado = await supabase.from(tabla).update({ ...base, cotizacion_venta: cot }).in('id', ids);
+    if (resultado.error && String(resultado.error.message).includes('cotizacion_venta')) {
+      return supabase.from(tabla).update(base).in('id', ids);
+    }
+    return resultado;
+  }
+
   // Evita que un doble toque dispare dos veces la misma operacion (por ejemplo, duplicar un ingreso)
   const conBloqueo = (fn) => async (...args) => {
     if (args[0] && typeof args[0].preventDefault === 'function') args[0].preventDefault();
@@ -686,13 +702,13 @@ function Admin() {
   const escaparCsv = (valor) => '"' + String(valor === null || valor === undefined ? '' : valor).replace(/"/g, '""') + '"';
 
   const exportarCSV = () => {
-    let csv = '﻿Categoria,Producto,Color,Fecha Venta,Costo USD,Venta USD,Ganancia USD\n';
+    let csv = '﻿Categoria,Producto,Color,Fecha Venta,Costo USD,Venta USD,Ganancia USD,Cotizacion,Venta ARS\n';
     ventasFiltradas.forEach((v) => {
       const fecha = v.fecha_venta ? new Date(v.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha';
       const ganancia = (v.precio_usd - v.costo_usd).toFixed(2);
       const cat = v.categoria === 'celular' ? 'Celular' : 'Accesorio';
       const producto = v.categoria === 'celular' ? v.modelo + ' ' + v.capacidad : v.tipo + ' ' + v.modelo;
-      csv += [escaparCsv(cat), escaparCsv(producto), escaparCsv(v.color), escaparCsv(fecha), v.costo_usd, v.precio_usd, ganancia].join(',') + '\n';
+      csv += [escaparCsv(cat), escaparCsv(producto), escaparCsv(v.color), escaparCsv(fecha), v.costo_usd, v.precio_usd, ganancia, cotizacionDe(v), Math.round(v.precio_usd * cotizacionDe(v))].join(',') + '\n';
     });
 
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -787,10 +803,7 @@ function Admin() {
 
     if (lotePermuta) {
       // El equipo entregado sale del stock como una venta al precio del lote
-      const { error: errorEntrega } = await supabase
-        .from('celulares')
-        .update({ estado: 'vendido', fecha_venta: new Date().toISOString(), precio_usd: lotePermuta.precio_usd })
-        .eq('id', lotePermuta.ids[0]);
+      const { error: errorEntrega } = await marcarVendido('celulares', [lotePermuta.ids[0]], { precio_usd: lotePermuta.precio_usd });
       if (errorEntrega) toast.error('El equipo recibido se cargo, pero no se pudo registrar la entrega: ' + errorEntrega.message);
       else toast.success('Permuta registrada: el equipo recibido entro al stock y el entregado quedo como vendido');
     } else {
@@ -898,10 +911,7 @@ function Admin() {
     const fecha = new Date().toISOString();
     const accesorios = accesoriosVenta;
     setVenta(null);
-    const { error } = await supabase
-      .from(tabla)
-      .update({ estado: 'vendido', fecha_venta: fecha, precio_usd: precioVenta })
-      .in('id', ids);
+    const { error } = await marcarVendido(tabla, ids, { precio_usd: precioVenta }, fecha);
     if (error) {
       toast.error('Error al registrar la venta: ' + error.message);
       return;
@@ -909,10 +919,7 @@ function Admin() {
 
     let unidadesAccesorios = 0;
     for (const { lote, cantidad, precioUsd } of accesorios) {
-      const { error: errorAccesorio } = await supabase
-        .from('accesorios')
-        .update({ estado: 'vendido', fecha_venta: fecha, precio_usd: precioUsd })
-        .in('id', lote.ids.slice(0, cantidad));
+      const { error: errorAccesorio } = await marcarVendido('accesorios', lote.ids.slice(0, cantidad), { precio_usd: precioUsd }, fecha);
       if (errorAccesorio) {
         toast.error('El celular se vendio, pero no se pudo descontar ' + lote.tipo + ' ' + lote.modelo + ': ' + errorAccesorio.message);
       } else {
@@ -1030,11 +1037,13 @@ function Admin() {
   // El revendedor rinde la plata (pasa a vendido, al precio acordado) o devuelve el equipo
   // (vuelve al stock con su precio de venta original)
   async function resolverRevendedor(ids, tabla, destino, precioUnidad) {
-    const cambios =
+    const { error } =
       destino === 'vendido'
-        ? { estado: 'vendido', fecha_venta: new Date().toISOString(), precio_usd: precioUnidad }
-        : { estado: 'disponible', revendedor: null, precio_revendedor: null, fecha_revendedor: null };
-    const { error } = await supabase.from(tabla).update(cambios).in('id', ids);
+        ? await marcarVendido(tabla, ids, { precio_usd: precioUnidad })
+        : await supabase
+            .from(tabla)
+            .update({ estado: 'disponible', revendedor: null, precio_revendedor: null, fecha_revendedor: null })
+            .in('id', ids);
     if (error) {
       toast.error('Error al actualizar: ' + error.message);
       return;
@@ -1199,19 +1208,20 @@ function Admin() {
 
   const totalVendidos = ventasFiltradas.length;
   const gananciaVentasUSD = ventasFiltradas.reduce((acc, item) => acc + (item.precio_usd - item.costo_usd), 0);
-  const gananciaVentasARS = gananciaVentasUSD * cot;
+  const gananciaVentasARS = ventasFiltradas.reduce((acc, item) => acc + (item.precio_usd - item.costo_usd) * cotizacionDe(item), 0);
 
   const ventasPorPagina = esEscritorio ? VENTAS_POR_PAGINA : 5;
   const totalPaginas = Math.ceil(ventasFiltradas.length / ventasPorPagina);
   const pagina = Math.min(paginaActual, Math.max(1, totalPaginas));
   const ventasPaginadas = ventasFiltradas.slice((pagina - 1) * ventasPorPagina, pagina * ventasPorPagina);
 
-  // Total vendido por mes (ultimos 12 meses con ventas). No se guarda la cotizacion de cada
-  // venta, asi que los pesos se calculan con la cotizacion actual.
+  // Total vendido por mes (ultimos 12 meses con ventas), en pesos a la cotizacion de cada
+  // venta (las que no tienen ese dato usan la actual).
   const resumenMensual = mesesDisponibles.slice(0, 12).map((mes) => {
     const ventasMes = ventasGlobales.filter((v) => obtenerMesAnio(v.fecha_venta) === mes);
     const totalUsd = ventasMes.reduce((acc, v) => acc + (Number(v.precio_usd) || 0), 0);
-    return { mes, unidades: ventasMes.length, totalUsd, totalArs: totalUsd * cot };
+    const totalArs = ventasMes.reduce((acc, v) => acc + (Number(v.precio_usd) || 0) * cotizacionDe(v), 0);
+    return { mes, unidades: ventasMes.length, totalUsd, totalArs };
   });
 
   const gananciaPorMes = mesesDisponibles
@@ -1708,7 +1718,7 @@ function Admin() {
               <p className="text-xl md:text-3xl font-black mt-1 text-green-600 break-words">$ {fmt(gananciaVentasUSD)}</p>
             </div>
             <div className="min-w-0 bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-emerald-400 col-span-2 md:col-span-1">
-              <p className="text-gray-500 text-xs md:text-sm font-medium">Ganancia (ARS, al dolar de hoy)</p>
+              <p className="text-gray-500 text-xs md:text-sm font-medium">Ganancia (ARS)</p>
               <p className="text-xl md:text-3xl font-black mt-1 text-emerald-600 break-words">$ {fmt(gananciaVentasARS)}</p>
             </div>
           </div>
@@ -1734,7 +1744,7 @@ function Admin() {
                 ))}
               </div>
               <p className="text-[10px] text-gray-400 mt-2">
-                Pesos calculados con la cotizacion actual. Toca un mes para filtrar el historial.
+                Pesos a la cotizacion del dia de cada venta (las ventas sin ese dato usan la cotizacion actual). Toca un mes para filtrar el historial.
               </p>
             </div>
           )}
