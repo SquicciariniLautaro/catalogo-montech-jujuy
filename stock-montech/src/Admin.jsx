@@ -558,13 +558,13 @@ function Admin() {
   const [mesSeleccionado, setMesSeleccionado] = useState('todos');
   const [paginaActual, setPaginaActual] = useState(1);
   const [menu, setMenu] = useState(null); // { key, item, tabla, top, right }
-  const [venta, setVenta] = useState(null); // { item, tabla, cantidad, mayorista }
+  const [venta, setVenta] = useState(null); // { item, tabla, cantidad, mayorista, precio (USD por unidad, solo celulares) }
   const [busquedaStock, setBusquedaStock] = useState('');
   // En pantallas chicas el formulario de ingreso y las familias del stock arrancan cerrados
   const [esEscritorio] = useState(() => window.matchMedia('(min-width: 768px)').matches);
   const [formAbierto, setFormAbierto] = useState(null); // null = segun el tamano de pantalla
   const [familiasAbiertas, setFamiliasAbiertas] = useState({});
-  const [asignacion, setAsignacion] = useState(null); // { item, tabla, nombre, cantidad, precio }
+  const [asignacion, setAsignacion] = useState(null); // { item, tabla, nombre, cantidad, precio (ARS por unidad) }
   const [resolucion, setResolucion] = useState(null); // { lote, destino, cantidad }
   const [dialogo, setDialogo] = useState(null); // { titulo, texto, botones: [{ etiqueta, clase, accion }] }
   const [guardando, setGuardando] = useState(false);
@@ -821,20 +821,30 @@ function Admin() {
   };
 
   // ---------- Ventas ----------
-  const confirmarVenta = (item, tabla) => setVenta({ item, tabla, cantidad: 1, mayorista: false });
+  const confirmarVenta = (item, tabla) => setVenta({ item, tabla, cantidad: 1, mayorista: false, precio: item.precio_usd });
 
   // Cantidad a vender, siempre entre 1 y las unidades del lote
   const cantidadVenta = venta ? Math.min(venta.item.cantidad, Math.max(1, parseInt(venta.cantidad) || 1)) : 0;
   // El descuento mayorista solo aplica a accesorios vendidos por cantidad (2 o mas unidades)
   const admiteMayorista = venta ? venta.tabla === 'accesorios' : false;
   const mayoristaActivo = admiteMayorista && venta.mayorista && cantidadVenta >= 2;
-  const precioVenta = venta
-    ? redondear(venta.item.precio_usd * (mayoristaActivo ? 1 - Number(descuentoMayorista) / 100 : 1))
-    : 0;
+  // En celulares el precio final por unidad se puede cambiar al vender (por ejemplo, si la
+  // operacion incluyo accesorios); en accesorios sale del lote, con descuento si es mayorista
+  const precioManual = venta && venta.tabla === 'celulares' ? parseFloat(venta.precio) : NaN;
+  const precioManualValido = precioManual >= 0;
+  const precioVenta = !venta
+    ? 0
+    : venta.tabla === 'celulares'
+    ? redondear(precioManualValido ? precioManual : 0)
+    : redondear(venta.item.precio_usd * (mayoristaActivo ? 1 - Number(descuentoMayorista) / 100 : 1));
 
   // La venta se registra al precio que muestra el lote (promedio), con descuento si es mayorista
   async function ejecutarVenta() {
     const { item, tabla } = venta;
+    if (tabla === 'celulares' && !precioManualValido) {
+      toast.error('Indica el precio final de venta');
+      return;
+    }
     const ids = item.ids.slice(0, cantidadVenta);
     setVenta(null);
     const { error } = await supabase
@@ -920,11 +930,17 @@ function Admin() {
     // Si ya existe un revendedor con ese nombre, se usa la misma escritura para no duplicarlo
     const existente = gruposRevendedor.find((g) => normalizar(g.nombre) === normalizar(escrito));
     const nombre = existente ? existente.nombre : escrito;
-    const precio = parseFloat(asignacion.precio);
-    if (!(precio >= 0)) {
+    // El precio se carga en pesos por unidad y se guarda en USD con la cotizacion actual
+    const precioArs = parseFloat(asignacion.precio);
+    if (!(precioArs >= 0)) {
       toast.error('Indica el precio acordado con el revendedor');
       return;
     }
+    if (!cot) {
+      toast.error('La cotizacion debe ser mayor a cero');
+      return;
+    }
+    const precio = precioArs / cot;
     const ids = item.ids.slice(0, cantidadAsignacion);
     setAsignacion(null);
     const { error } = await supabase
@@ -1804,7 +1820,7 @@ function Admin() {
                   if (tabla === 'celulares') iniciarEdicionCelular(item);
                   else iniciarEdicionAccesorio(item);
                 }}
-                className="px-4 py-3 text-sm font-bold text-blue-600 bg-white hover:bg-blue-50 text-left border-b border-gray-50"
+                className="px-4 py-3 text-sm font-bold text-gray-900 bg-white hover:bg-gray-100 text-left border-b border-gray-50"
               >
                 Editar
               </button>
@@ -1822,9 +1838,9 @@ function Admin() {
                 onClick={() => {
                   const { item, tabla } = menu;
                   setMenu(null);
-                  setAsignacion({ item, tabla, nombre: '', cantidad: 1, precio: item.precio_usd });
+                  setAsignacion({ item, tabla, nombre: '', cantidad: 1, precio: Math.round(item.precio_usd * cot) });
                 }}
-                className="px-4 py-3 text-sm font-bold text-purple-700 bg-white hover:bg-purple-50 text-left border-b border-gray-50"
+                className="px-4 py-3 text-sm font-bold text-gray-900 bg-white hover:bg-gray-100 text-left border-b border-gray-50"
               >
                 A revendedor
               </button>
@@ -1898,7 +1914,7 @@ function Admin() {
             )}
 
             <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">
-              Precio para el revendedor (USD por unidad)
+              Precio por unidad para el revendedor (pesos ARS)
             </label>
             <input
               required
@@ -1910,16 +1926,17 @@ function Admin() {
               className={claseInputModal + ' font-bold'}
             />
             <p className="text-[11px] font-medium text-gray-500 mt-1">
-              Precio de venta al publico: USD {fmt(asignacion.item.precio_usd)}. Cambialo si al revendedor se lo dejas a otro precio.
+              Precio de venta al publico: ARS $ {fmt(Math.round(asignacion.item.precio_usd * cot))} por unidad. Este precio se aplica a cada una de las {cantidadAsignacion} unidad(es) que le entregas.
             </p>
 
             <div className="mt-3 bg-purple-50 border border-purple-100 rounded-lg p-3">
               <div className="flex justify-between gap-2 text-base font-black text-purple-800">
-                <span>Queda debiendo ({cantidadAsignacion} u.)</span>
-                <span>USD {fmt((Number(asignacion.precio) || 0) * cantidadAsignacion)}</span>
+                <span>Queda debiendo</span>
+                <span>ARS $ {fmt(Math.round((Number(asignacion.precio) || 0) * cantidadAsignacion))}</span>
               </div>
               <p className="text-right text-xs font-bold text-gray-500 mt-0.5">
-                ARS $ {fmt(Math.round((Number(asignacion.precio) || 0) * cantidadAsignacion * cot))}
+                {cantidadAsignacion} u. x $ {fmt(Number(asignacion.precio) || 0)}
+                {cot ? ' = USD ' + fmt(((Number(asignacion.precio) || 0) * cantidadAsignacion) / cot) : ''}
               </p>
               <p className="text-[11px] font-medium text-purple-700 mt-2">
                 El equipo sale del stock y del catalogo publico, pero no se cuenta como vendido hasta que el revendedor pague.
@@ -2111,6 +2128,26 @@ function Admin() {
               >
                 Vender todas ({venta.item.cantidad}){admiteMayorista ? ' - podes aplicar el descuento mayorista abajo' : ''}
               </button>
+            )}
+
+            {venta.tabla === 'celulares' && (
+              <Fragment>
+                <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">
+                  Precio final de venta (USD por unidad)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={venta.precio}
+                  onChange={(e) => setVenta({ ...venta, precio: e.target.value })}
+                  className={claseInputModal + ' font-bold'}
+                />
+                <p className="text-[11px] font-medium text-gray-500 mt-1">
+                  Precio de lista: USD {fmt(venta.item.precio_usd)}. Cambialo si la operacion se cerro por otro monto (por ejemplo, si llevo accesorios).
+                  {cantidadVenta > 1 ? ' Se aplica a cada una de las ' + cantidadVenta + ' unidades.' : ''}
+                </p>
+              </Fragment>
             )}
 
             {admiteMayorista && (
