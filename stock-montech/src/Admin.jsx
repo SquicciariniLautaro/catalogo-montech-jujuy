@@ -1081,7 +1081,9 @@ function Admin() {
     const grupos = {};
     const grupo = (nombre) => {
       const k = normalizar(nombre);
-      if (!grupos[k]) grupos[k] = { nombre, unidades: 0, totalUsd: 0, lotes: {}, pagadoUsd: 0, pagadoArs: 0, pagos: 0 };
+      if (!grupos[k]) {
+        grupos[k] = { nombre, unidades: 0, totalUsd: 0, lotes: {}, pagadoUsd: 0, pagadoArs: 0, pagos: 0, aplicadoUsd: 0, aplicadoArs: 0 };
+      }
       return grupos[k];
     };
     enRevendedor.forEach((u) => {
@@ -1097,12 +1099,25 @@ function Admin() {
     });
     pagosRevendedor.forEach((pago) => {
       const g = grupo(String(pago.revendedor || '').trim() || 'Sin nombre');
-      g.pagadoUsd += Number(pago.monto_usd) || 0;
-      g.pagadoArs += Number(pago.monto_ars) || 0;
-      g.pagos += 1;
+      const usd = Number(pago.monto_usd) || 0;
+      const ars = Number(pago.monto_ars) || 0;
+      if (usd < 0 || ars < 0) {
+        // Fila negativa: parte de lo entregado que ya se aplico a equipos marcados como pagados
+        g.aplicadoUsd += -usd;
+        g.aplicadoArs += -ars;
+      } else {
+        g.pagadoUsd += usd;
+        g.pagadoArs += ars;
+        g.pagos += 1;
+      }
     });
     return Object.values(grupos)
-      .map((g) => ({ ...g, lotes: Object.values(g.lotes), saldoUsd: g.totalUsd - g.pagadoUsd }))
+      .map((g) => {
+        // Credito = lo entregado que todavia no se aplico a ningun equipo
+        const creditoUsd = g.pagadoUsd - g.aplicadoUsd;
+        const creditoArs = g.pagadoArs - g.aplicadoArs;
+        return { ...g, lotes: Object.values(g.lotes), creditoUsd, creditoArs, saldoUsd: g.totalUsd - creditoUsd };
+      })
       .sort((a, b) => comparar(a.nombre, b.nombre));
   })();
 
@@ -1110,6 +1125,15 @@ function Admin() {
   const saldoCubierto = (saldoUsd) => saldoUsd < 0.005;
 
   const totalEnLaCalleUsd = gruposRevendedor.reduce((acc, g) => acc + g.totalUsd, 0);
+  const totalEntregadoUsd = gruposRevendedor.reduce((acc, g) => acc + Math.max(0, g.creditoUsd), 0);
+  const totalEntregadoArs = gruposRevendedor.reduce((acc, g) => acc + Math.max(0, g.creditoArs), 0);
+  const saldoPendienteUsd = gruposRevendedor.reduce((acc, g) => acc + Math.max(0, g.saldoUsd), 0);
+
+  // Revendedor al que pertenece un lote de la pestana Revendedores
+  const grupoDeLote = (lote) => {
+    const nombre = String(lote.revendedor || '').trim() || 'Sin nombre';
+    return gruposRevendedor.find((g) => normalizar(g.nombre) === normalizar(nombre)) || null;
+  };
 
   // ---------- Carrito de revendedor ----------
   const loteDelCarrito = (c) =>
@@ -1287,23 +1311,19 @@ function Admin() {
       ],
     });
 
-  // El revendedor rinde la plata (pasa a vendido, al precio acordado) o devuelve el equipo
-  // (vuelve al stock con su precio de venta original)
-  async function resolverRevendedor(ids, tabla, destino, precioUnidad) {
-    const { error } =
-      destino === 'vendido'
-        ? await marcarVendido(tabla, ids, { precio_usd: precioUnidad })
-        : await porTandas(ids, (tanda) => supabase
-            .from(tabla)
-            .update({ estado: 'disponible', revendedor: null, precio_revendedor: null, fecha_revendedor: null })
-            .in('id', tanda));
+  // El revendedor devuelve el equipo: vuelve al stock con su precio de venta original
+  async function devolverRevendedor(ids, tabla) {
+    const { error } = await porTandas(ids, (tanda) =>
+      supabase
+        .from(tabla)
+        .update({ estado: 'disponible', revendedor: null, precio_revendedor: null, fecha_revendedor: null })
+        .in('id', tanda)
+    );
     if (error) {
       toast.error('Error al actualizar: ' + error.message);
       return;
     }
-    toast.success(
-      ids.length + (destino === 'vendido' ? ' unidad(es) marcada(s) como vendida(s)' : ' unidad(es) devuelta(s) al stock')
-    );
+    toast.success(ids.length + ' unidad(es) devuelta(s) al stock');
     cargarDatos(false);
   }
 
@@ -1313,11 +1333,67 @@ function Admin() {
     ? Math.min(resolucion.lote.cantidad, Math.max(1, parseInt(resolucion.cantidad) || 1))
     : 0;
 
+  // Al marcar equipos como pagados, primero se descuenta lo que el revendedor ya entrego a
+  // cuenta; lo que falte se toma como cobrado en ese momento.
+  const grupoResolucion = resolucion ? grupoDeLote(resolucion.lote) : null;
+  const valorResolucionUsd = resolucion ? resolucion.lote.precioUnidad * cantidadResolucion : 0;
+  const aplicaCreditoUsd =
+    resolucion && resolucion.destino === 'vendido' && grupoResolucion
+      ? Math.min(Math.max(grupoResolucion.creditoUsd, 0), valorResolucionUsd)
+      : 0;
+  const aplicaCreditoArs =
+    grupoResolucion && grupoResolucion.creditoUsd > 0
+      ? grupoResolucion.creditoArs * (aplicaCreditoUsd / grupoResolucion.creditoUsd)
+      : 0;
+  const cobroAhoraArs = Math.max(0, valorResolucionUsd * cot - aplicaCreditoArs);
+
   async function ejecutarResolucion() {
     const { lote, destino } = resolucion;
     const ids = lote.ids.slice(0, cantidadResolucion);
+    const grupo = grupoResolucion;
+    const nombre = grupo ? grupo.nombre : String(lote.revendedor || '').trim();
+    const valorUsd = valorResolucionUsd;
+    const aplicadoUsd = aplicaCreditoUsd;
+    const aplicadoArs = aplicaCreditoArs;
     setResolucion(null);
-    await resolverRevendedor(ids, lote.tabla, destino, lote.precioUnidad);
+
+    if (destino !== 'vendido') {
+      await devolverRevendedor(ids, lote.tabla);
+      return;
+    }
+
+    const { error } = await marcarVendido(lote.tabla, ids, { precio_usd: lote.precioUnidad });
+    if (error) {
+      toast.error('Error al registrar el pago: ' + error.message);
+      return;
+    }
+
+    // Lo entregado a cuenta que cubre estos equipos se descuenta con una fila negativa
+    if (aplicadoUsd > 0.005) {
+      const { error: errorAplicacion } = await supabase.from('pagos_revendedor').insert({
+        revendedor: nombre,
+        monto_ars: -redondear(aplicadoArs),
+        cotizacion: cot,
+        monto_usd: -redondear(aplicadoUsd),
+      });
+      if (errorAplicacion) {
+        toast.error('Los equipos se marcaron como pagados, pero no se pudo descontar lo entregado a cuenta: ' + errorAplicacion.message);
+      }
+    }
+
+    // Cobrar equipos ahora baja el saldo; si no quedan equipos o el saldo queda cubierto, se cierra la cuenta
+    const quedan = grupo ? grupo.unidades - ids.length : 0;
+    const saldoNuevoUsd = grupo ? grupo.saldoUsd - (valorUsd - aplicadoUsd) : 0;
+    if (quedan === 0 || saldoCubierto(saldoNuevoUsd)) {
+      const { error: errorCierre } = await cerrarCuentaRevendedor(nombre);
+      if (errorCierre) toast.error('Se registro el pago, pero no se pudo cerrar la cuenta: ' + errorCierre.message);
+      else toast.success('Cuenta de ' + nombre + ' saldada: sus equipos quedaron como vendidos');
+    } else {
+      toast.success(
+        ids.length + ' unidad(es) marcada(s) como pagada(s). Saldo de ' + nombre + ': ARS $ ' + fmt(Math.round(saldoNuevoUsd * cot))
+      );
+    }
+    cargarDatos(false);
   }
 
   // ---------- Sumar stock a un lote existente ----------
@@ -1876,21 +1952,28 @@ function Admin() {
         {/* ===================== TAB REVENDEDORES ===================== */}
         {activeTab === 'revendedores' && (
           <div className="space-y-4 md:space-y-6">
-            <div className="bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 grid grid-cols-2 md:grid-cols-3 gap-4">
+            <div className="bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 grid grid-cols-2 md:grid-cols-4 gap-4">
               <div className="border-l-4 border-gray-400 pl-3 min-w-0">
                 <p className="text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1">Unidades en la calle</p>
                 <p className="font-black text-lg md:text-2xl text-gray-800">{enRevendedor.length}</p>
               </div>
+              <div className="border-l-4 border-blue-500 pl-3 min-w-0">
+                <p className="text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1">Total equipos</p>
+                <p className="font-black text-base md:text-xl text-gray-800 break-words">ARS $ {fmt(Math.round(totalEnLaCalleUsd * cot))}</p>
+                <p className="text-[11px] font-semibold text-gray-500">USD {fmt(totalEnLaCalleUsd)}</p>
+              </div>
+              <div className="border-l-4 border-green-500 pl-3 min-w-0">
+                <p className="text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1">Entregado a cuenta</p>
+                <p className="font-black text-base md:text-xl text-green-600 break-words">ARS $ {fmt(Math.round(totalEntregadoArs))}</p>
+                <p className="text-[11px] font-semibold text-gray-500">USD {fmt(totalEntregadoUsd)}</p>
+              </div>
               <div className="border-l-4 border-purple-500 pl-3 min-w-0">
-                <p className="text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1">Total en USD</p>
-                <p className="font-black text-lg md:text-2xl text-purple-700 break-words">$ {fmt(totalEnLaCalleUsd)}</p>
+                <p className="text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1">Saldo pendiente</p>
+                <p className="font-black text-base md:text-xl text-purple-700 break-words">ARS $ {fmt(Math.round(saldoPendienteUsd * cot))}</p>
+                <p className="text-[11px] font-semibold text-gray-500">USD {fmt(saldoPendienteUsd)}</p>
               </div>
-              <div className="border-l-4 border-green-500 pl-3 min-w-0 col-span-2 md:col-span-1">
-                <p className="text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1">Total en ARS</p>
-                <p className="font-black text-lg md:text-2xl text-green-600 break-words">$ {fmt(Math.round(totalEnLaCalleUsd * cot))}</p>
-              </div>
-              <p className="col-span-2 md:col-span-3 text-[11px] text-gray-400">
-                Equipos entregados a consignacion. Siguen apareciendo en el catalogo publico (con una "R" cuando es la unica unidad), pero no en el stock disponible. Para entregar equipos, usa Opciones y luego "Al carrito revendedor" en el stock.
+              <p className="col-span-2 md:col-span-4 text-[11px] text-gray-400">
+                Equipos entregados a consignacion. Siguen apareciendo en el catalogo publico (con una "R" cuando es la unica unidad), pero no en el stock disponible. Cuando un revendedor paga un equipo, tocas "Pagado" y pasa al historial de ventas. Para entregar equipos, usa Opciones y luego "Al carrito revendedor" en el stock.
               </p>
             </div>
 
@@ -1920,9 +2003,14 @@ function Admin() {
                     Total equipos: <span className="font-bold text-gray-900">ARS $ {fmt(Math.round(g.totalUsd * cot))}</span>
                   </span>
                   <span className="text-right">
-                    Entregado: <span className="font-bold text-gray-900">ARS $ {fmt(Math.round(g.pagadoArs))}</span>
+                    Entregado a cuenta: <span className="font-bold text-gray-900">ARS $ {fmt(Math.round(Math.max(0, g.creditoArs)))}</span>
                     {g.pagos > 0 ? ' (' + g.pagos + ' pago(s))' : ''}
                   </span>
+                  {g.aplicadoArs > 0 && (
+                    <span className="col-span-2 text-[11px] font-medium text-gray-500">
+                      Ya aplicado a equipos pagados: ARS $ {fmt(Math.round(g.aplicadoArs))} (pasaron al historial de ventas)
+                    </span>
+                  )}
                 </div>
                 <div className="px-3 md:px-4 py-2 border-b border-gray-200 flex flex-wrap gap-2">
                   <button
@@ -1976,6 +2064,12 @@ function Admin() {
                         )}
                       </div>
                       <div className="flex gap-2">
+                        <button
+                          onClick={() => confirmarResolucion(lote, 'vendido')}
+                          className="flex-1 md:flex-none bg-green-600 text-white px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-green-700 transition"
+                        >
+                          Pagado
+                        </button>
                         <button
                           onClick={() => confirmarResolucion(lote, 'disponible')}
                           className="flex-1 md:flex-none bg-gray-200 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-gray-300 transition"
@@ -2474,7 +2568,7 @@ function Admin() {
         <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto">
             <h2 className="text-xl font-bold text-gray-800">
-              {resolucion.destino === 'vendido' ? 'El revendedor pago' : 'El revendedor devolvio'}
+              {resolucion.destino === 'vendido' ? 'Marcar como pagado' : 'El revendedor devolvio'}
             </h2>
             <p className="text-sm font-semibold text-gray-600 mt-1 break-words">
               {resolucion.lote.revendedor}: {nombreItem(resolucion.lote, resolucion.lote.tabla)}
@@ -2523,18 +2617,38 @@ function Admin() {
             )}
 
             <div className="mt-3 bg-gray-50 border border-gray-200 rounded-lg p-3">
-              <div className="flex justify-between gap-2 text-base font-black text-gray-800">
-                <span>{resolucion.destino === 'vendido' ? 'Cobras' : 'Deja de deber'} ({cantidadResolucion} u.)</span>
-                <span>USD {fmt(resolucion.lote.precioUnidad * cantidadResolucion)}</span>
-              </div>
-              <p className="text-right text-xs font-bold text-gray-500 mt-0.5">
-                ARS $ {fmt(Math.round(resolucion.lote.precioUnidad * cantidadResolucion * cot))}
-              </p>
-              <p className="text-[11px] font-medium text-gray-500 mt-2">
-                {resolucion.destino === 'vendido'
-                  ? 'Pasa al historial de ventas con la fecha de hoy, al precio acordado.'
-                  : 'Vuelve al stock disponible con su precio de venta original.'}
-              </p>
+              {resolucion.destino === 'vendido' ? (
+                <Fragment>
+                  <div className="flex justify-between gap-2 text-xs font-semibold text-gray-600">
+                    <span>Valor de {cantidadResolucion} unidad(es)</span>
+                    <span>ARS $ {fmt(Math.round(valorResolucionUsd * cot))}</span>
+                  </div>
+                  {aplicaCreditoUsd > 0.005 && (
+                    <div className="flex justify-between gap-2 mt-0.5 text-xs font-semibold text-gray-600">
+                      <span>Ya entregado a cuenta</span>
+                      <span>- ARS $ {fmt(Math.round(aplicaCreditoArs))}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between gap-2 mt-1 text-base font-black text-gray-800">
+                    <span>Cobras ahora</span>
+                    <span>ARS $ {fmt(Math.round(cobroAhoraArs))}</span>
+                  </div>
+                  <p className="text-[11px] font-medium text-gray-500 mt-2">
+                    Pasa al historial de ventas con la fecha de hoy, al precio acordado.
+                    {aplicaCreditoUsd > 0.005 ? ' Lo que ya entrego a cuenta se descuenta de este pago.' : ''}
+                  </p>
+                </Fragment>
+              ) : (
+                <Fragment>
+                  <div className="flex justify-between gap-2 text-base font-black text-gray-800">
+                    <span>Deja de deber ({cantidadResolucion} u.)</span>
+                    <span>ARS $ {fmt(Math.round(valorResolucionUsd * cot))}</span>
+                  </div>
+                  <p className="text-[11px] font-medium text-gray-500 mt-2">
+                    Vuelve al stock disponible con su precio de venta original.
+                  </p>
+                </Fragment>
+              )}
             </div>
 
             <div className="flex gap-3 mt-4">
