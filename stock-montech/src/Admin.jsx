@@ -41,7 +41,7 @@ const VENTAS_POR_PAGINA = 10;
 
 // Colores del grafico por mes: paleta categorica en orden fijo
 const COLORES_GRAFICO = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300'];
-const ALTO_MENU = 240;
+const ALTO_MENU = 290;
 
 // Columnas compartidas por el encabezado y las filas del stock en escritorio
 const COLUMNAS_STOCK = 'md:grid md:grid-cols-[minmax(0,1fr)_17rem_8rem] md:gap-4 md:items-center';
@@ -198,6 +198,42 @@ async function traerTodo(armarConsulta) {
     if (data.length < TAMANO_PAGINA) return { data: filas, error: null };
   }
 }
+
+// ---------- Precios por tramo de cantidad (accesorios) ----------
+// Cada accesorio puede tener tramos { desde, moneda: 'usd' | 'ars', precio }. Para una cantidad
+// se usa el tramo con el mayor "desde" que no la supere; si no hay ninguno aplicable, el precio
+// de lista. Devuelve el precio por unidad en USD y en pesos.
+const precioPorCantidad = (tramos, cantidad, precioListaUsd, cot) => {
+  let tramo = null;
+  (tramos || []).forEach((t) => {
+    if (t.desde <= cantidad && (!tramo || t.desde > tramo.desde)) tramo = t;
+  });
+  const lista = Number(precioListaUsd) || 0;
+  if (!tramo) return { tramo: null, unitarioUsd: lista, unitarioArs: lista * cot };
+  return tramo.moneda === 'ars'
+    ? { tramo, unitarioUsd: cot ? tramo.precio / cot : 0, unitarioArs: tramo.precio }
+    : { tramo, unitarioUsd: tramo.precio, unitarioArs: tramo.precio * cot };
+};
+
+// Rangos de la escala completa para mostrarla: "1 a 4 u.", "5 a 9 u.", "10 o mas u."
+const describirTramos = (tramos, precioListaUsd, cot) => {
+  const orden = [...tramos].sort((a, b) => a.desde - b.desde);
+  const filas = [];
+  if (orden.length > 0 && orden[0].desde > 1) {
+    const hasta = orden[0].desde - 1;
+    filas.push({ rango: hasta === 1 ? '1 u.' : '1 a ' + hasta + ' u.', ars: Math.round((Number(precioListaUsd) || 0) * cot) });
+  }
+  orden.forEach((t, i) => {
+    const siguiente = orden[i + 1];
+    const rango = siguiente
+      ? siguiente.desde - 1 === t.desde
+        ? t.desde + ' u.'
+        : t.desde + ' a ' + (siguiente.desde - 1) + ' u.'
+      : t.desde + ' o mas u.';
+    filas.push({ rango, ars: Math.round(precioPorCantidad([t], t.desde, 0, cot).unitarioArs) });
+  });
+  return filas;
+};
 
 // Los ids viajan en la direccion de la consulta: con lotes grandes (cientos de unidades) hay
 // que mandarlos por tandas para no superar el largo maximo
@@ -627,13 +663,17 @@ function AccionesEdicion({ cantidad, valor, onChange, onGuardar, onCancelar }) {
 
 function Admin() {
   const [cotizacion, setCotizacion] = useState(1250);
-  const [descuentoMayorista, setDescuentoMayorista] = useState(5);
   const [activeTab, setActiveTab] = useState('celulares');
 
   const [stockCelulares, setStockCelulares] = useState([]);
   const [stockAccesorios, setStockAccesorios] = useState([]);
   const [ventasGlobales, setVentasGlobales] = useState([]);
   const [enRevendedor, setEnRevendedor] = useState([]); // unidades entregadas a consignacion
+  const [escalas, setEscalas] = useState({}); // precios por cantidad: clave del accesorio -> tramos
+  const [editorEscala, setEditorEscala] = useState(null); // { lote, filas: [{ desde, moneda, precio }] }
+  const [listaRevendedores, setListaRevendedores] = useState([]); // revendedores guardados
+  const [revForm, setRevForm] = useState(null); // { id, nombre, celular, bloqueaNombre }
+  const [carritoCelular, setCarritoCelular] = useState('');
   const [cargando, setCargando] = useState(true);
 
   const estadoInicialCelular = { modelo: '', capacidad: '', color: '', bateria: '', costo_usd: '', precio_usd: '', detalles: '', cantidad: 1 };
@@ -653,7 +693,7 @@ function Admin() {
   const [mesSeleccionado, setMesSeleccionado] = useState('todos');
   const [paginaActual, setPaginaActual] = useState(1);
   const [menu, setMenu] = useState(null); // { key, item, tabla, top, right }
-  const [venta, setVenta] = useState(null); // { item, tabla, cantidad, mayorista, precio (ARS por unidad, celulares), accesorios: [{ id, cantidad, modo, precio }] }
+  const [venta, setVenta] = useState(null); // { item, tabla, cantidad, precio (ARS por unidad, celulares), accesorios: [{ id, cantidad, modo, precio }] }
   const [busquedaStock, setBusquedaStock] = useState('');
   // En pantallas chicas el formulario de ingreso arranca cerrado; las familias del stock, siempre
   const [esEscritorio] = useState(() => window.matchMedia('(min-width: 768px)').matches);
@@ -757,12 +797,7 @@ function Admin() {
     const fallo = [config, celDisponibles, accDisponibles, celVendidos, accVendidos, celRevendedor, accRevendedor].find((r) => r.error);
     if (fallo) toast.error('Error al cargar datos: ' + fallo.error.message);
 
-    if (config.data) {
-      setCotizacion(config.data.cotizacion_dolar);
-      if (config.data.descuento_mayorista !== null && config.data.descuento_mayorista !== undefined) {
-        setDescuentoMayorista(config.data.descuento_mayorista);
-      }
-    }
+    if (config.data) setCotizacion(config.data.cotizacion_dolar);
     if (celDisponibles.data) setStockCelulares(agruparStock(celDisponibles.data, claveCelular, (l) => ordenarPorPrecio(l, (c) => familiaDeModelo(c.modelo), compararCelulares, (c) => marcaDeModelo(c.modelo))));
     if (accDisponibles.data) setStockAccesorios(agruparStock(accDisponibles.data, claveAccesorio, (l) => ordenarPorPrecio(l, (x) => x.tipo, compararAccesorios)));
 
@@ -778,6 +813,37 @@ function Admin() {
     );
     setPagosRevendedor(pagos.error ? [] : pagos.data);
 
+    // Precios por cantidad de los accesorios (tabla opcional: si falta, se vende a precio de lista)
+    const esc = await traerTodo(() => supabase.from('escalas_precio').select('*').order('desde'));
+    const mapaEscalas = {};
+    (esc.error ? [] : esc.data).forEach((r) => {
+      (mapaEscalas[r.clave] = mapaEscalas[r.clave] || []).push({ id: r.id, desde: r.desde, moneda: r.moneda, precio: Number(r.precio) });
+    });
+    setEscalas(mapaEscalas);
+
+    // Lista guardada de revendedores (tabla opcional). Los que ya figuran en equipos o pagos
+    // y todavia no estan en la lista se guardan, para que no desaparezcan al cerrar su cuenta.
+    const lista = await traerTodo(() => supabase.from('revendedores_lista').select('*').order('nombre'));
+    let guardados = lista.error ? [] : lista.data;
+    if (!lista.error) {
+      const enUso = new Map();
+      [...(celRevendedor.data || []), ...(accRevendedor.data || []), ...(pagos.error ? [] : pagos.data)].forEach((u) => {
+        const nombre = String(u.revendedor || '').trim();
+        if (nombre) enUso.set(normalizar(nombre), nombre);
+      });
+      const faltan = [...enUso.entries()]
+        .filter(([clave]) => !guardados.some((r) => r.clave === clave))
+        .map(([clave, nombre]) => ({ nombre, clave }));
+      if (faltan.length > 0) {
+        const { data: nuevos, error: errorLista } = await supabase
+          .from('revendedores_lista')
+          .upsert(faltan, { onConflict: 'clave', ignoreDuplicates: true })
+          .select();
+        if (!errorLista && nuevos) guardados = [...guardados, ...nuevos];
+      }
+    }
+    setListaRevendedores(guardados);
+
     setEnRevendedor([
       ...(celRevendedor.data || []).map((u) => ({ ...u, tabla: 'celulares' })),
       ...(accRevendedor.data || []).map((u) => ({ ...u, tabla: 'accesorios' })),
@@ -788,20 +854,12 @@ function Admin() {
 
   async function handleActualizarConfiguracion() {
     const nuevaCotizacion = parseFloat(cotizacion);
-    const nuevoDescuento = parseFloat(descuentoMayorista);
     if (!(nuevaCotizacion > 0)) {
       toast.error('La cotizacion debe ser mayor a cero');
       return;
     }
-    if (!(nuevoDescuento >= 0 && nuevoDescuento <= 100)) {
-      toast.error('El descuento mayorista debe estar entre 0 y 100');
-      return;
-    }
-    const { error } = await supabase
-      .from('configuracion')
-      .update({ cotizacion_dolar: nuevaCotizacion, descuento_mayorista: nuevoDescuento })
-      .eq('id', 1);
-    if (!error) toast.success('Configuracion global actualizada');
+    const { error } = await supabase.from('configuracion').update({ cotizacion_dolar: nuevaCotizacion }).eq('id', 1);
+    if (!error) toast.success('Cotizacion actualizada');
     else toast.error('Error al guardar: ' + error.message);
   }
 
@@ -942,13 +1000,14 @@ function Admin() {
 
   // ---------- Ventas ----------
   const confirmarVenta = (item, tabla) =>
-    setVenta({ item, tabla, cantidad: 1, mayorista: false, precio: Math.round(item.precio_usd * cot), accesorios: [] });
+    setVenta({ item, tabla, cantidad: 1, precio: Math.round(item.precio_usd * cot), accesorios: [] });
 
   // Cantidad a vender, siempre entre 1 y las unidades del lote
   const cantidadVenta = venta ? Math.min(venta.item.cantidad, Math.max(1, parseInt(venta.cantidad) || 1)) : 0;
-  // El descuento mayorista solo aplica a accesorios vendidos por cantidad (2 o mas unidades)
-  const admiteMayorista = venta ? venta.tabla === 'accesorios' : false;
-  const mayoristaActivo = admiteMayorista && venta.mayorista && cantidadVenta >= 2;
+  // Precio de un accesorio segun la cantidad: usa los precios por cantidad cargados, si hay
+  const cotizarEscala = (lote, cantidad) =>
+    precioPorCantidad(escalas[claveAccesorio(lote)], cantidad, lote.precio_usd, cot);
+  const escalaVenta = venta && venta.tabla === 'accesorios' ? cotizarEscala(venta.item, cantidadVenta) : null;
 
   // En celulares el precio final por unidad se carga en pesos y se puede cambiar al vender.
   // Si no se toco, se conserva el precio exacto en USD del lote.
@@ -959,7 +1018,7 @@ function Admin() {
     ? 0
     : venta.tabla === 'celulares'
     ? redondear(!precioManualValido ? 0 : precioSinCambios ? venta.item.precio_usd : precioManualArs / cot)
-    : redondear(venta.item.precio_usd * (mayoristaActivo ? 1 - Number(descuentoMayorista) / 100 : 1));
+    : redondear(escalaVenta.unitarioUsd);
 
   // Accesorios vendidos junto al celular. Cada uno puede ir a precio de lista, a un precio
   // especial (en pesos por unidad) o gratis.
@@ -970,13 +1029,14 @@ function Admin() {
           if (!lote) return null;
           const cantidad = Math.min(lote.cantidad, Math.max(1, parseInt(a.cantidad) || 1));
           const precioArs = parseFloat(a.precio);
+          const escala = cotizarEscala(lote, cantidad);
           const precioUsd =
             a.modo === 'gratis'
               ? 0
               : a.modo === 'especial'
               ? precioArs >= 0 && cot > 0 ? redondear(precioArs / cot) : NaN
-              : lote.precio_usd;
-          return { ...a, lote, cantidad, precioUsd };
+              : redondear(escala.unitarioUsd);
+          return { ...a, lote, cantidad, precioUsd, escala };
         })
         .filter(Boolean)
     : [];
@@ -1002,8 +1062,8 @@ function Admin() {
   const quitarAccesorioVenta = (id) =>
     setVenta({ ...venta, accesorios: venta.accesorios.filter((a) => a.id !== id) });
 
-  // La venta se registra al precio final cargado (celulares) o al del lote, con descuento
-  // mayorista si corresponde (accesorios). Los accesorios elegidos salen del stock a su precio.
+  // La venta se registra al precio final cargado (celulares) o al que corresponde por cantidad
+  // (accesorios). Los accesorios elegidos salen del stock al precio indicado.
   async function ejecutarVenta() {
     const { item, tabla } = venta;
     if (tabla === 'celulares' && !precioManualValido) {
@@ -1082,7 +1142,10 @@ function Admin() {
     const grupo = (nombre) => {
       const k = normalizar(nombre);
       if (!grupos[k]) {
-        grupos[k] = { nombre, unidades: 0, totalUsd: 0, lotes: {}, pagadoUsd: 0, pagadoArs: 0, pagos: 0, aplicadoUsd: 0, aplicadoArs: 0 };
+        grupos[k] = {
+          nombre, unidades: 0, totalUsd: 0, lotes: {}, pagadoUsd: 0, pagadoArs: 0, pagos: 0, aplicadoUsd: 0, aplicadoArs: 0,
+          celular: '', idLista: null,
+        };
       }
       return grupos[k];
     };
@@ -1110,6 +1173,12 @@ function Admin() {
         g.pagadoArs += ars;
         g.pagos += 1;
       }
+    });
+    // Los revendedores guardados aparecen aunque no tengan equipos ni pagos
+    listaRevendedores.forEach((r) => {
+      const g = grupo(r.nombre);
+      g.celular = r.celular || '';
+      g.idLista = r.id;
     });
     return Object.values(grupos)
       .map((g) => {
@@ -1239,6 +1308,8 @@ function Admin() {
       }
     }
 
+    await asegurarEnLista(nombre, carritoCelular);
+
     if (entregadoCarritoArs > 0) {
       const { error } = await registrarPagoRevendedor(nombre, entregadoCarritoArs);
       if (error) toast.error('Los equipos se asignaron, pero no se pudo guardar el monto entregado: ' + error.message);
@@ -1253,6 +1324,7 @@ function Admin() {
     }
     setCarrito([]);
     setCarritoNombre('');
+    setCarritoCelular('');
     setCarritoEntregado('');
     setCarritoAbierto(false);
     cargarDatos(false);
@@ -1396,6 +1468,164 @@ function Admin() {
     cargarDatos(false);
   }
 
+  // ---------- Lista de revendedores ----------
+  const tieneMovimientos = (g) => g.unidades > 0 || g.pagos > 0 || g.aplicadoArs > 0;
+
+  const abrirAltaRevendedor = () => setRevForm({ id: null, nombre: '', celular: '', bloqueaNombre: false });
+
+  const abrirEdicionRevendedor = (g) =>
+    setRevForm({ id: g.idLista, nombre: g.nombre, celular: g.celular || '', bloqueaNombre: tieneMovimientos(g) || !g.idLista });
+
+  async function guardarRevendedor() {
+    const nombre = revForm.nombre.trim();
+    const celular = revForm.celular.trim();
+    const clave = normalizar(nombre);
+    if (!clave) {
+      toast.error('Coloque el nombre del revendedor');
+      return;
+    }
+    const repetido = gruposRevendedor.find((g) => g.idLista && g.idLista !== revForm.id && normalizar(g.nombre) === clave);
+    if (repetido) {
+      toast.error('Ya existe un revendedor con ese nombre');
+      return;
+    }
+    const datos = { nombre, clave, celular: celular || null };
+    const { error } = revForm.id
+      ? await supabase.from('revendedores_lista').update(revForm.bloqueaNombre ? { celular: datos.celular } : datos).eq('id', revForm.id)
+      : await supabase.from('revendedores_lista').insert(datos);
+    if (error) {
+      toast.error('No se pudo guardar el revendedor: ' + error.message);
+      return;
+    }
+    setRevForm(null);
+    toast.success(revForm.id ? 'Datos actualizados' : nombre + ' quedo guardado en la lista');
+    cargarDatos(false);
+  }
+
+  // Guarda al revendedor en la lista la primera vez que se le entrega algo (si ya esta, no hace nada)
+  async function asegurarEnLista(nombre, celular = '') {
+    const clave = normalizar(nombre);
+    if (!clave || listaRevendedores.some((r) => r.clave === clave)) return;
+    await supabase
+      .from('revendedores_lista')
+      .upsert({ nombre, clave, celular: celular.trim() || null }, { onConflict: 'clave', ignoreDuplicates: true });
+  }
+
+  // No se puede eliminar a quien todavia tiene equipos o debe plata
+  const pedirEliminarRevendedor = (g) => {
+    const aviso = (texto) => toast.error(texto, { duration: 6000 });
+    if (g.unidades > 0) {
+      aviso(g.nombre + ' todavia tiene ' + g.unidades + ' equipo(s) en su poder. Registra el pago o la devolucion antes de eliminarlo.');
+      return;
+    }
+    if (g.saldoUsd > 0.005) {
+      aviso(g.nombre + ' todavia debe ARS $ ' + fmt(Math.round(g.saldoUsd * cot)) + '. Registra el pago antes de eliminarlo.');
+      return;
+    }
+    if (tieneMovimientos(g)) {
+      aviso('La cuenta de ' + g.nombre + ' tiene pagos sin cerrar. Toca "Cerrar cuenta" antes de eliminarlo.');
+      return;
+    }
+    if (!g.idLista) return;
+    setDialogo({
+      titulo: 'Eliminar a ' + g.nombre,
+      texto: 'Se quita de la lista de revendedores. Las ventas que ya se registraron con su nombre no se tocan.',
+      botones: [
+        {
+          etiqueta: 'Eliminar',
+          clase: 'bg-red-600 hover:bg-red-700',
+          accion: async () => {
+            const { error } = await supabase.from('revendedores_lista').delete().eq('id', g.idLista);
+            if (error) toast.error('No se pudo eliminar: ' + error.message);
+            else toast.success(g.nombre + ' se elimino de la lista');
+            cargarDatos(false);
+          },
+        },
+      ],
+    });
+  };
+
+  // ---------- Precios por cantidad de un accesorio ----------
+  const abrirEditorEscala = (lote) =>
+    setEditorEscala({
+      lote,
+      filas: (escalas[claveAccesorio(lote)] || []).map((t) => ({ desde: String(t.desde), moneda: t.moneda, precio: String(t.precio) })),
+    });
+
+  const cambiarFilaEscala = (i, cambios) =>
+    setEditorEscala({ ...editorEscala, filas: editorEscala.filas.map((f, j) => (j === i ? { ...f, ...cambios } : f)) });
+  const quitarFilaEscala = (i) => setEditorEscala({ ...editorEscala, filas: editorEscala.filas.filter((_, j) => j !== i) });
+  const agregarFilaEscala = () =>
+    setEditorEscala({ ...editorEscala, filas: [...editorEscala.filas, { desde: '', moneda: 'ars', precio: '' }] });
+
+  // Al cambiar de moneda se convierte el monto cargado, para conservar el mismo precio
+  const cambiarMonedaFilaEscala = (i, moneda) => {
+    const fila = editorEscala.filas[i];
+    if (fila.moneda === moneda) return;
+    const valor = parseFloat(fila.precio);
+    const precio = valor >= 0 && cot > 0 ? String(moneda === 'usd' ? redondear(valor / cot) : Math.round(valor * cot)) : fila.precio;
+    cambiarFilaEscala(i, { moneda, precio });
+  };
+
+  const copiarEscalaDe = (clave) => {
+    if (!clave) return;
+    setEditorEscala({
+      ...editorEscala,
+      filas: (escalas[clave] || []).map((t) => ({ desde: String(t.desde), moneda: t.moneda, precio: String(t.precio) })),
+    });
+  };
+
+  // "5 a 9 unidades" / "10 o mas unidades", segun los otros tramos cargados
+  const rangoEscala = (filas, i) => {
+    const desde = parseInt(filas[i].desde);
+    if (!(desde >= 1)) return 'Tramo nuevo';
+    const siguientes = filas.map((f) => parseInt(f.desde)).filter((n) => n > desde);
+    if (siguientes.length === 0) return desde + ' o mas unidades';
+    const hasta = Math.min(...siguientes) - 1;
+    return hasta === desde ? desde + (desde === 1 ? ' unidad' : ' unidades') : desde + ' a ' + hasta + ' unidades';
+  };
+
+  async function guardarEscala() {
+    const { lote, filas } = editorEscala;
+    const tramos = filas.map((f) => ({ desde: parseInt(f.desde), moneda: f.moneda, precio: parseFloat(f.precio) }));
+    if (tramos.some((t) => !(t.desde >= 1) || !(t.precio >= 0))) {
+      toast.error('Completa la cantidad "desde" y el precio de cada tramo');
+      return;
+    }
+    const desdes = tramos.map((t) => t.desde);
+    if (new Set(desdes).size !== desdes.length) {
+      toast.error('Hay dos tramos que empiezan en la misma cantidad');
+      return;
+    }
+    const clave = claveAccesorio(lote);
+    setEditorEscala(null);
+    if (tramos.length > 0) {
+      const { error } = await supabase.from('escalas_precio').upsert(
+        tramos.map((t) => ({
+          clave,
+          desde: t.desde,
+          moneda: t.moneda,
+          precio: t.moneda === 'usd' ? redondear(t.precio) : Math.round(t.precio * 100) / 100,
+        })),
+        { onConflict: 'clave,desde' }
+      );
+      if (error) {
+        toast.error('Error al guardar los precios: ' + error.message);
+        return;
+      }
+    }
+    // Se quitan los tramos que ya no estan en la lista
+    let borrado = supabase.from('escalas_precio').delete().eq('clave', clave);
+    if (tramos.length > 0) borrado = borrado.not('desde', 'in', '(' + desdes.join(',') + ')');
+    const { error: errorBorrado } = await borrado;
+    if (errorBorrado) {
+      toast.error('Error al actualizar los precios: ' + errorBorrado.message);
+      return;
+    }
+    toast.success(tramos.length > 0 ? 'Precios por cantidad guardados' : 'Se quitaron los precios por cantidad');
+    cargarDatos(false);
+  }
+
   // ---------- Sumar stock a un lote existente ----------
   const cantidadSuma = suma ? Math.max(1, parseInt(suma.cantidad) || 1) : 0;
 
@@ -1528,6 +1758,20 @@ function Admin() {
     if (!error) {
       // Los valores cargados a mano ya no son un promedio (columna opcional: se ignora si falta)
       await porTandas(datos.ids, (tanda) => supabase.from('accesorios').update({ promediado: false }).in('id', tanda));
+      // Si cambio la identidad del accesorio, sus precios por cantidad lo acompanan
+      const antes = stockAccesorios.find((l) => String(l.ids[0]) === String(editandoAccesorioId));
+      if (antes && datos.ids.length === antes.ids.length) {
+        const claveVieja = claveAccesorio(antes);
+        const claveNueva = claveAccesorio({
+          tipo,
+          modelo: String(formEdicionAccesorio.modelo || '').trim(),
+          color: datos.color,
+          detalles: String(formEdicionAccesorio.detalles || '').trim(),
+        });
+        if (claveVieja !== claveNueva && escalas[claveVieja] && !escalas[claveNueva]) {
+          await supabase.from('escalas_precio').update({ clave: claveNueva }).eq('clave', claveVieja);
+        }
+      }
       toast.success(datos.ids.length + ' accesorio(s) actualizado(s)');
       setEditandoAccesorioId(null);
       cargarDatos(false);
@@ -1654,7 +1898,7 @@ function Admin() {
             </button>
           </div>
         </div>
-        <div className="grid grid-cols-2 md:flex gap-2 md:gap-3 items-start">
+        <div className="grid grid-cols-[minmax(0,1fr)_auto] md:flex gap-2 md:gap-3 items-stretch">
           <label className="flex items-center min-w-0 bg-white p-1.5 rounded-xl shadow-sm border border-gray-200">
             <span className="font-semibold px-2 text-green-600 text-[11px] md:text-xs uppercase">Cotizacion $</span>
             <input
@@ -1665,23 +1909,9 @@ function Admin() {
               className="flex-1 min-w-0 md:flex-none md:w-20 border-l pl-2 py-1 outline-none font-bold text-base md:text-sm text-gray-700 bg-transparent"
             />
           </label>
-          <div className="min-w-0">
-          <label className="flex items-center min-w-0 bg-white p-1.5 rounded-xl shadow-sm border border-gray-200">
-            <span className="font-semibold px-2 text-blue-600 text-[11px] md:text-xs uppercase">Desc. mayorista %</span>
-            <input
-              type="number"
-              min="0"
-              max="100"
-              value={descuentoMayorista}
-              onChange={(e) => setDescuentoMayorista(e.target.value)}
-              className="flex-1 min-w-0 md:flex-none md:w-16 border-l pl-2 py-1 outline-none font-bold text-base md:text-sm text-gray-700 bg-transparent"
-            />
-          </label>
-          <p className="text-[9px] text-gray-400 font-medium mt-1 ml-1 leading-tight">Se aplica al vender accesorios por cantidad</p>
-          </div>
           <button
             onClick={conBloqueo(handleActualizarConfiguracion)}
-            className="col-span-2 bg-gray-900 text-white px-4 py-2.5 md:py-2 rounded-lg text-sm font-medium hover:bg-gray-800 transition"
+            className="bg-gray-900 text-white px-4 py-2.5 md:py-2 rounded-lg text-sm font-medium hover:bg-gray-800 transition"
           >
             Guardar
           </button>
@@ -1930,7 +2160,7 @@ function Admin() {
                       key={acc.ids[0]}
                       item={acc}
                       titulo={acc.tipo + ' - ' + acc.modelo}
-                      subtitulo={[acc.detalles].filter(Boolean)}
+                      subtitulo={[acc.detalles, (escalas[claveAccesorio(acc)] || []).length > 0 ? 'Con precios por cantidad' : ''].filter(Boolean)}
                       cot={cot}
                       onOpciones={(e) => abrirMenu(e, acc, 'accesorios')}
                     />
@@ -1977,9 +2207,19 @@ function Admin() {
               </p>
             </div>
 
+            <button
+              type="button"
+              onClick={abrirAltaRevendedor}
+              className="w-full md:w-auto bg-purple-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold shadow-sm hover:bg-purple-700 transition"
+            >
+              + Agregar revendedor
+            </button>
+
             {gruposRevendedor.length === 0 && (
               <div className="bg-white rounded-2xl shadow-sm border border-gray-200">
-                <p className="text-center p-8 text-gray-500">No hay equipos asignados a revendedores.</p>
+                <p className="text-center p-8 text-gray-500">
+                  Todavia no hay revendedores. Agrega uno con el boton de arriba o entregale equipos desde el carrito.
+                </p>
               </div>
             )}
 
@@ -1989,6 +2229,11 @@ function Admin() {
                   <div className="min-w-0">
                     <h2 className="text-lg font-bold text-gray-900 break-words">{g.nombre}</h2>
                     <p className="text-xs font-semibold text-gray-500">{g.unidades} unidad(es) en su poder</p>
+                    {g.celular && (
+                      <a href={'tel:' + g.celular.replace(/[^\d+]/g, '')} className="text-xs font-semibold text-blue-600 hover:underline">
+                        {g.celular}
+                      </a>
+                    )}
                   </div>
                   <div className="text-right">
                     <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">
@@ -1998,6 +2243,7 @@ function Admin() {
                     <p className="text-xs font-bold text-gray-500">USD {fmt(Math.abs(g.saldoUsd))}</p>
                   </div>
                 </div>
+                {tieneMovimientos(g) && (
                 <div className="px-3 md:px-4 py-2 border-b border-gray-200 grid grid-cols-2 gap-2 text-xs font-semibold text-gray-600">
                   <span>
                     Total equipos: <span className="font-bold text-gray-900">ARS $ {fmt(Math.round(g.totalUsd * cot))}</span>
@@ -2012,14 +2258,17 @@ function Admin() {
                     </span>
                   )}
                 </div>
+                )}
                 <div className="px-3 md:px-4 py-2 border-b border-gray-200 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setPagoRevendedor({ nombre: g.nombre, monto: '' })}
-                    className="flex-1 md:flex-none bg-green-600 text-white px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-green-700 transition"
-                  >
-                    Registrar pago
-                  </button>
+                  {tieneMovimientos(g) && (
+                    <button
+                      type="button"
+                      onClick={() => setPagoRevendedor({ nombre: g.nombre, monto: '' })}
+                      className="flex-1 md:flex-none bg-green-600 text-white px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-green-700 transition"
+                    >
+                      Registrar pago
+                    </button>
+                  )}
                   {saldoCubierto(g.saldoUsd) && (
                     <button
                       type="button"
@@ -2029,7 +2278,22 @@ function Admin() {
                       Cerrar cuenta
                     </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => abrirEdicionRevendedor(g)}
+                    className="flex-1 md:flex-none bg-white border border-gray-300 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-gray-50 transition"
+                  >
+                    Editar datos
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => pedirEliminarRevendedor(g)}
+                    className="flex-1 md:flex-none bg-white border border-gray-300 text-red-500 px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-red-50 transition"
+                  >
+                    Eliminar
+                  </button>
                 </div>
+                {g.lotes.length === 0 && <p className="px-3 md:px-4 py-3 text-xs text-gray-500">Sin equipos en su poder.</p>}
                 <div className="divide-y divide-gray-100">
                   {g.lotes.map((lote) => (
                     <div key={lote.tabla + '-' + lote.ids[0]} className="p-3 md:px-4 flex flex-col gap-2 md:flex-row md:items-center md:gap-4">
@@ -2327,6 +2591,18 @@ function Admin() {
               >
                 Sumar stock
               </button>
+              {menu.tabla === 'accesorios' && (
+                <button
+                  onClick={() => {
+                    const { item } = menu;
+                    setMenu(null);
+                    abrirEditorEscala(item);
+                  }}
+                  className="px-4 py-3 text-sm font-bold text-gray-900 bg-white hover:bg-gray-100 text-left border-b border-gray-50"
+                >
+                  Precios por cantidad
+                </button>
+              )}
               <button
                 onClick={() => {
                   const { item, tabla } = menu;
@@ -2388,6 +2664,21 @@ function Admin() {
                 <option key={g.nombre} value={g.nombre} />
               ))}
             </datalist>
+
+            {carritoNombre.trim() && !grupoCarrito && (
+              <Fragment>
+                <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">Celular del revendedor (opcional)</label>
+                <input
+                  type="tel"
+                  inputMode="tel"
+                  value={carritoCelular}
+                  onChange={(e) => setCarritoCelular(e.target.value)}
+                  placeholder="Ej: 388 5123456"
+                  className={claseInputModal}
+                />
+                <p className="text-[11px] font-medium text-gray-500 mt-1">Es un revendedor nuevo: queda guardado en la lista.</p>
+              </Fragment>
+            )}
 
             {itemsCarrito.length === 0 ? (
               <p className="mt-4 text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded-lg p-3">
@@ -2671,6 +2962,172 @@ function Admin() {
         </div>
       )}
 
+      {/* MODAL: AGREGAR O EDITAR REVENDEDOR */}
+      {revForm && (
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <form
+            onSubmit={conBloqueo(guardarRevendedor)}
+            autoComplete="off"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto"
+          >
+            <h2 className="text-xl font-bold text-gray-800">
+              {revForm.id || revForm.bloqueaNombre ? 'Datos del revendedor' : 'Agregar revendedor'}
+            </h2>
+
+            <label className="text-xs font-bold text-gray-600 mt-4 mb-1 block">Nombre del revendedor</label>
+            <input
+              required
+              autoFocus={!revForm.bloqueaNombre}
+              type="text"
+              value={revForm.nombre}
+              disabled={revForm.bloqueaNombre}
+              onChange={(e) => setRevForm({ ...revForm, nombre: e.target.value })}
+              placeholder="Coloque nombre del revendedor"
+              className={claseInputModal + (revForm.bloqueaNombre ? ' opacity-60' : '')}
+            />
+            {revForm.bloqueaNombre && (
+              <p className="text-[11px] font-medium text-gray-500 mt-1">
+                El nombre no se puede cambiar mientras tenga equipos o pagos sin cerrar.
+              </p>
+            )}
+
+            <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">Celular</label>
+            <input
+              type="tel"
+              inputMode="tel"
+              value={revForm.celular}
+              onChange={(e) => setRevForm({ ...revForm, celular: e.target.value })}
+              placeholder="Ej: 388 5123456"
+              className={claseInputModal}
+            />
+
+            <div className="flex gap-3 mt-4">
+              <button type="button" onClick={() => setRevForm(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
+                Cancelar
+              </button>
+              <button type="submit" disabled={guardando} className="disabled:opacity-60 flex-1 bg-purple-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-purple-700 transition">
+                Guardar
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* MODAL: PRECIOS POR CANTIDAD DE UN ACCESORIO */}
+      {editorEscala && (
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <form
+            onSubmit={conBloqueo(guardarEscala)}
+            autoComplete="off"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto"
+          >
+            <h2 className="text-xl font-bold text-gray-800">Precios por cantidad</h2>
+            <p className="text-sm font-semibold text-gray-600 mt-1 break-words">{nombreItem(editorEscala.lote, 'accesorios')}</p>
+            <p className="text-[11px] font-medium text-gray-500 mt-1">
+              Precio de lista: ARS $ {fmt(Math.round(editorEscala.lote.precio_usd * cot))} por unidad. Cada tramo vale desde la cantidad indicada hasta que empieza el siguiente. Las cantidades que no entran en ningun tramo se venden a precio de lista.
+            </p>
+
+            {stockAccesorios.some((l) => l !== editorEscala.lote && (escalas[claveAccesorio(l)] || []).length > 0) && (
+              <select
+                value=""
+                onChange={(e) => copiarEscalaDe(e.target.value)}
+                aria-label="Copiar los tramos de otro accesorio"
+                className={claseInputModal + ' mt-3 text-gray-700'}
+              >
+                <option value="">Copiar los tramos de otro accesorio...</option>
+                {stockAccesorios
+                  .filter((l) => l !== editorEscala.lote && (escalas[claveAccesorio(l)] || []).length > 0)
+                  .map((l) => (
+                    <option key={l.ids[0]} value={claveAccesorio(l)}>
+                      {nombreItem(l, 'accesorios')}
+                    </option>
+                  ))}
+              </select>
+            )}
+
+            <ul className="mt-3 space-y-2">
+              {editorEscala.filas.map((f, i) => {
+                const valor = parseFloat(f.precio);
+                return (
+                  <li key={i} className="bg-gray-50 border border-gray-200 rounded-lg p-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">{rangoEscala(editorEscala.filas, i)}</span>
+                      <button type="button" onClick={() => quitarFilaEscala(i)} className="shrink-0 text-xs font-bold text-red-500 hover:underline px-1">
+                        Quitar
+                      </button>
+                    </div>
+                    <div className="mt-1 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-2">
+                      <Campo etiqueta="Desde (u.)">
+                        <input
+                          className={claseInputEdicion}
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={f.desde}
+                          onChange={(e) => cambiarFilaEscala(i, { desde: e.target.value })}
+                        />
+                      </Campo>
+                      <Campo etiqueta={'Precio por unidad (' + (f.moneda === 'ars' ? 'pesos' : 'dolares') + ')'}>
+                        {f.moneda === 'ars' ? (
+                          <InputPesos className={claseInputEdicion} value={f.precio} onChange={(precio) => cambiarFilaEscala(i, { precio })} />
+                        ) : (
+                          <input
+                            className={claseInputEdicion}
+                            type="number"
+                            min="0"
+                            step="any"
+                            value={f.precio}
+                            onChange={(e) => cambiarFilaEscala(i, { precio: e.target.value })}
+                          />
+                        )}
+                      </Campo>
+                    </div>
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <div className="inline-flex shrink-0 border border-gray-300 rounded-lg overflow-hidden" role="group" aria-label="Moneda del precio">
+                        {['ars', 'usd'].map((m) => (
+                          <button
+                            key={m}
+                            type="button"
+                            aria-pressed={f.moneda === m}
+                            onClick={() => cambiarMonedaFilaEscala(i, m)}
+                            className={'px-3 py-1.5 text-xs font-bold ' + (f.moneda === m ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-100')}
+                          >
+                            {m === 'ars' ? 'Pesos' : 'Dolares'}
+                          </button>
+                        ))}
+                      </div>
+                      <span className="min-w-0 text-right text-[11px] font-bold text-green-600">
+                        {valor >= 0 && cot > 0
+                          ? (f.moneda === 'ars' ? 'USD ' + fmt(valor / cot) : 'ARS $ ' + fmt(Math.round(valor * cot))) +
+                            ' (dolar a $ ' + fmt(cot) + ')'
+                          : ''}
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+
+            <button
+              type="button"
+              onClick={agregarFilaEscala}
+              className="mt-2 w-full border border-dashed border-gray-300 text-gray-700 rounded-lg py-2.5 text-sm font-bold hover:bg-gray-50 transition"
+            >
+              + Agregar tramo
+            </button>
+
+            <div className="flex gap-3 mt-4">
+              <button type="button" onClick={() => setEditorEscala(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
+                Cancelar
+              </button>
+              <button type="submit" disabled={guardando} className="disabled:opacity-60 flex-1 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition">
+                Guardar
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* MODAL: SUMAR STOCK */}
       {suma && (
         <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
@@ -2882,7 +3339,7 @@ function Admin() {
                 onClick={() => setVenta({ ...venta, cantidad: venta.item.cantidad })}
                 className="mt-2 text-xs font-bold text-blue-600 hover:underline py-1"
               >
-                Vender todas ({venta.item.cantidad}){admiteMayorista ? ' - podes aplicar el descuento mayorista abajo' : ''}
+                Vender todas ({venta.item.cantidad})
               </button>
             )}
 
@@ -2929,6 +3386,7 @@ function Admin() {
                             {x.lote.tipo} {x.lote.modelo}
                             <span className="block text-[11px] font-semibold text-gray-500">
                               Lista: ARS $ {fmt(Math.round(x.lote.precio_usd * cot))} c/u
+                              {x.escala && x.escala.tramo ? ' - por cantidad: ARS $ ' + fmt(Math.round(x.escala.unitarioArs)) + ' c/u' : ''}
                             </span>
                           </span>
                           <button
@@ -2967,7 +3425,7 @@ function Admin() {
                             aria-label="Precio del accesorio"
                             className="flex-1 min-w-0 border border-gray-300 rounded-lg px-2 bg-white text-sm font-semibold text-gray-800 outline-none"
                           >
-                            <option value="lista">Precio de lista</option>
+                            <option value="lista">Lista / por cantidad</option>
                             <option value="especial">Precio especial</option>
                             <option value="gratis">Gratis (regalo)</option>
                           </select>
@@ -2996,31 +3454,17 @@ function Admin() {
               </Fragment>
             )}
 
-            {admiteMayorista && (
-              <label
-                className={
-                  'mt-3 flex items-start gap-2 bg-blue-50 border border-blue-100 rounded-lg p-3 ' +
-                  (cantidadVenta >= 2 ? 'cursor-pointer' : 'opacity-60')
-                }
-              >
-                <input
-                  type="checkbox"
-                  checked={mayoristaActivo}
-                  disabled={cantidadVenta < 2}
-                  onChange={(e) => setVenta({ ...venta, mayorista: e.target.checked })}
-                  className="w-4 h-4 mt-0.5 shrink-0"
-                />
-                <span className="min-w-0">
-                  <span className="block text-sm font-bold text-blue-800">
-                    Aplicar descuento mayorista: {descuentoMayorista}% menos por unidad
-                  </span>
-                  <span className="block text-[11px] font-medium text-blue-700 mt-0.5">
-                    {cantidadVenta >= 2
-                      ? 'Es el porcentaje "Desc. mayorista" configurado arriba en el panel. Se descuenta de cada unidad de esta venta.'
-                      : 'Disponible al vender 2 o mas unidades. Usa el porcentaje "Desc. mayorista" configurado arriba en el panel.'}
-                  </span>
-                </span>
-              </label>
+            {venta.tabla === 'accesorios' && (escalas[claveAccesorio(venta.item)] || []).length > 0 && (
+              <div className="mt-3 bg-green-50 border border-green-100 rounded-lg p-3 text-xs font-semibold text-green-700">
+                <p className="font-bold">Precios por cantidad de este accesorio</p>
+                <ul className="mt-1 space-y-0.5">
+                  {describirTramos(escalas[claveAccesorio(venta.item)], venta.item.precio_usd, cot).map((f) => (
+                    <li key={f.rango}>
+                      {f.rango}: ARS $ {fmt(f.ars)} c/u
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
 
             {venta.tabla === 'celulares' ? (
@@ -3045,14 +3489,14 @@ function Admin() {
               </div>
             ) : (
               <div className="mt-3 bg-green-50 border border-green-100 rounded-lg p-3">
-                {mayoristaActivo && (
+                {escalaVenta && escalaVenta.tramo && redondear(escalaVenta.unitarioUsd) !== redondear(venta.item.precio_usd) && (
                   <div className="flex justify-between gap-2 text-xs font-semibold text-gray-500">
                     <span>Precio de lista por unidad</span>
                     <span className="line-through">USD {fmt(venta.item.precio_usd)}</span>
                   </div>
                 )}
                 <div className="flex justify-between gap-2 text-xs font-semibold text-gray-600">
-                  <span>{mayoristaActivo ? 'Precio mayorista por unidad (-' + descuentoMayorista + '%)' : 'Precio por unidad'}</span>
+                  <span>{escalaVenta && escalaVenta.tramo ? 'Precio por cantidad (por unidad)' : 'Precio por unidad'}</span>
                   <span>USD {fmt(precioVenta)}</span>
                 </div>
                 <div className="flex justify-between gap-2 mt-1 text-base font-black text-green-700">
