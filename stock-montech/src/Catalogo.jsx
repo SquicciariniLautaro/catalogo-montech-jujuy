@@ -109,32 +109,38 @@ const compararAccesorios = (a, b) => {
   return (Number(a.precio_usd) || 0) - (Number(b.precio_usd) || 0);
 };
 
-// Marca de un celular segun su modelo. Los iPhone se cargan sin marca ("13 PRO", "iPhone 13")
-// y devuelven ''; el resto lleva la marca como primera palabra ("Samsung A55" -> "SAMSUNG").
+// Familia de un modelo: el nombre normalizado sin la palabra "iPhone", para que "iPhone 13" y
+// "13" queden juntos.
+const familiaDeModelo = (modelo) => normalizar(modelo).replace(/^IPHONE\s*/, '');
+
+// iPhone que se cargan sin numero adelante ("SE 2022", "XR", "XS MAX")
+const IPHONE_SIN_NUMERO = ['SE', 'X', 'XR', 'XS'];
+
+// Marca de un celular segun su modelo. Los iPhone ("13 PRO", "iPhone 13", "XR") devuelven '';
+// el resto lleva la marca como primera palabra ("Samsung A55" -> "SAMSUNG").
 const marcaDeModelo = (modelo) => {
-  const texto = normalizar(modelo);
-  if (texto === '' || /^\d/.test(texto) || texto.startsWith('IPHONE')) return '';
-  return texto.split(' ')[0];
+  const texto = familiaDeModelo(modelo);
+  const primera = texto.split(' ')[0];
+  if (texto === '' || /^\d/.test(texto) || IPHONE_SIN_NUMERO.includes(primera)) return '';
+  return primera;
 };
 
-// Ordena de menor a mayor precio sin romper los grupos por familia: las familias van segun
-// su producto mas barato y, dentro de cada familia, los productos de menor a mayor precio
-//
-// Con varias marcas, primero van los iPhone y despues cada marca junta, en orden alfabetico.
+// Orden jerarquico, igual en el catalogo y en el panel:
+// 1. Marca: primero los iPhone, despues cada marca junta en orden alfabetico.
+// 2. Familia del modelo en orden natural (13, 13 PRO, 14, 14 PRO...); en accesorios, el tipo.
+// 3. Solo dentro de cada familia, de menor a mayor precio.
+// Asi un equipo de gama alta vendido barato no queda por encima de los de gama menor.
 const ordenarPorPrecio = (lista, obtenerFamilia, desempate, obtenerMarca = () => '') => {
   const precio = (item) => Number(item.precio_usd) || 0;
-  const minimos = {};
-  lista.forEach((item) => {
-    const familia = normalizar(obtenerFamilia(item));
-    if (!(familia in minimos) || precio(item) < minimos[familia]) minimos[familia] = precio(item);
-  });
   return [...lista].sort((a, b) => {
     const ma = obtenerMarca(a);
     const mb = obtenerMarca(b);
     if (ma !== mb) return ma === '' ? -1 : mb === '' ? 1 : comparar(ma, mb);
     const fa = normalizar(obtenerFamilia(a));
     const fb = normalizar(obtenerFamilia(b));
-    if (fa !== fb) return minimos[fa] - minimos[fb] || comparar(fa, fb);
+    // Los iPhone con letras (X, XR, XS, SE) son de gama mas baja: van antes que los numerados
+    const conNumero = (f) => (/^\d/.test(f) ? 1 : 0);
+    if (fa !== fb) return conNumero(fa) - conNumero(fb) || comparar(fa, fb);
     return precio(a) - precio(b) || desempate(a, b);
   });
 };
@@ -222,7 +228,7 @@ function Catalogo() {
         );
 
         if (celularesData) {
-          setCelularesAgrupados(ordenarPorPrecio(agruparCatalogo(celularesData, claveCelular), (x) => x.modelo, compararCelulares, (x) => marcaDeModelo(x.modelo)));
+          setCelularesAgrupados(ordenarPorPrecio(agruparCatalogo(celularesData, claveCelular), (x) => familiaDeModelo(x.modelo), compararCelulares, (x) => marcaDeModelo(x.modelo)));
         }
 
         const { data: accesoriosData, error: errorAccesorios } = await traerTodo(() =>
@@ -353,8 +359,8 @@ function Catalogo() {
 
   const filasCelulares = armarFilasConSeparador(
     celularesFiltrados,
-    (c) => c.modelo,
-    (c) => String(c.modelo || '').toUpperCase(),
+    (c) => familiaDeModelo(c.modelo),
+    (c) => familiaDeModelo(c.modelo),
     (c) => c.capacidad
   );
 

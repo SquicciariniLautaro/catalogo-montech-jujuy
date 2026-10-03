@@ -110,32 +110,38 @@ const compararAccesorios = (a, b) =>
   comparar(a.color, b.color) ||
   (Number(a.precio_usd) || 0) - (Number(b.precio_usd) || 0);
 
-// Marca de un celular segun su modelo. Los iPhone se cargan sin marca ("13 PRO", "iPhone 13")
-// y devuelven ''; el resto lleva la marca como primera palabra ("Samsung A55" -> "SAMSUNG").
+// Familia de un modelo: el nombre normalizado sin la palabra "iPhone", para que "iPhone 13" y
+// "13" queden juntos.
+const familiaDeModelo = (modelo) => normalizar(modelo).replace(/^IPHONE\s*/, '');
+
+// iPhone que se cargan sin numero adelante ("SE 2022", "XR", "XS MAX")
+const IPHONE_SIN_NUMERO = ['SE', 'X', 'XR', 'XS'];
+
+// Marca de un celular segun su modelo. Los iPhone ("13 PRO", "iPhone 13", "XR") devuelven '';
+// el resto lleva la marca como primera palabra ("Samsung A55" -> "SAMSUNG").
 const marcaDeModelo = (modelo) => {
-  const texto = normalizar(modelo);
-  if (texto === '' || /^\d/.test(texto) || texto.startsWith('IPHONE')) return '';
-  return texto.split(' ')[0];
+  const texto = familiaDeModelo(modelo);
+  const primera = texto.split(' ')[0];
+  if (texto === '' || /^\d/.test(texto) || IPHONE_SIN_NUMERO.includes(primera)) return '';
+  return primera;
 };
 
-// Ordena de menor a mayor precio sin romper los grupos por familia: las familias van segun
-// su producto mas barato y, dentro de cada familia, los productos de menor a mayor precio
-//
-// Con varias marcas, primero van los iPhone y despues cada marca junta, en orden alfabetico.
+// Orden jerarquico, igual en el catalogo y en el panel:
+// 1. Marca: primero los iPhone, despues cada marca junta en orden alfabetico.
+// 2. Familia del modelo en orden natural (13, 13 PRO, 14, 14 PRO...); en accesorios, el tipo.
+// 3. Solo dentro de cada familia, de menor a mayor precio.
+// Asi un equipo de gama alta vendido barato no queda por encima de los de gama menor.
 const ordenarPorPrecio = (lista, obtenerFamilia, desempate, obtenerMarca = () => '') => {
   const precio = (item) => Number(item.precio_usd) || 0;
-  const minimos = {};
-  lista.forEach((item) => {
-    const familia = normalizar(obtenerFamilia(item));
-    if (!(familia in minimos) || precio(item) < minimos[familia]) minimos[familia] = precio(item);
-  });
   return [...lista].sort((a, b) => {
     const ma = obtenerMarca(a);
     const mb = obtenerMarca(b);
     if (ma !== mb) return ma === '' ? -1 : mb === '' ? 1 : comparar(ma, mb);
     const fa = normalizar(obtenerFamilia(a));
     const fb = normalizar(obtenerFamilia(b));
-    if (fa !== fb) return minimos[fa] - minimos[fb] || comparar(fa, fb);
+    // Los iPhone con letras (X, XR, XS, SE) son de gama mas baja: van antes que los numerados
+    const conNumero = (f) => (/^\d/.test(f) ? 1 : 0);
+    if (fa !== fb) return conNumero(fa) - conNumero(fb) || comparar(fa, fb);
     return precio(a) - precio(b) || desempate(a, b);
   });
 };
@@ -479,10 +485,10 @@ function IconoFlecha({ abierto }) {
 }
 
 // Agrupa una lista ya ordenada en familias consecutivas (modelo o tipo)
-const agruparFamilias = (lista, campo) => {
+const agruparFamilias = (lista, obtenerNombre) => {
   const familias = [];
   lista.forEach((item) => {
-    const nombre = String(item[campo] || 'Sin nombre').trim();
+    const nombre = String(obtenerNombre(item) || 'Sin nombre').trim();
     const clave = normalizar(nombre);
     const ultima = familias[familias.length - 1];
     if (ultima && ultima.clave === clave) {
@@ -649,11 +655,16 @@ function Admin() {
   const [menu, setMenu] = useState(null); // { key, item, tabla, top, right }
   const [venta, setVenta] = useState(null); // { item, tabla, cantidad, mayorista, precio (ARS por unidad, celulares), accesorios: [{ id, cantidad, modo, precio }] }
   const [busquedaStock, setBusquedaStock] = useState('');
-  // En pantallas chicas el formulario de ingreso y las familias del stock arrancan cerrados
+  // En pantallas chicas el formulario de ingreso arranca cerrado; las familias del stock, siempre
   const [esEscritorio] = useState(() => window.matchMedia('(min-width: 768px)').matches);
   const [formAbierto, setFormAbierto] = useState(null); // null = segun el tamano de pantalla
   const [familiasAbiertas, setFamiliasAbiertas] = useState({});
-  const [asignacion, setAsignacion] = useState(null); // { item, tabla, nombre, cantidad, precio (ARS por unidad) }
+  const [carrito, setCarrito] = useState([]); // [{ id, tabla, cantidad, precio (ARS por unidad) }]
+  const [carritoAbierto, setCarritoAbierto] = useState(false);
+  const [carritoNombre, setCarritoNombre] = useState('');
+  const [carritoEntregado, setCarritoEntregado] = useState('');
+  const [pagosRevendedor, setPagosRevendedor] = useState([]); // pagos a cuenta todavia no aplicados
+  const [pagoRevendedor, setPagoRevendedor] = useState(null); // { nombre, monto (ARS) }
   const [suma, setSuma] = useState(null); // { item, tabla, cantidad }
   const [borrado, setBorrado] = useState(null); // { item, tabla, cantidad }
   const [resolucion, setResolucion] = useState(null); // { lote, destino, cantidad }
@@ -698,11 +709,11 @@ function Admin() {
 
   const formVisible = formAbierto === null ? esEscritorio : formAbierto;
 
-  // Una familia se muestra abierta si se esta buscando, o segun lo que se haya tocado
+  // Las familias arrancan cerradas en cualquier pantalla y se abren al tocarlas.
+  // Al buscar se abren todas para mostrar los resultados.
   const familiaAbierta = (tab, clave) => {
     if (busquedaStock.trim()) return true;
-    const guardado = familiasAbiertas[tab + '|' + clave];
-    return guardado === undefined ? esEscritorio : guardado;
+    return familiasAbiertas[tab + '|' + clave] === true;
   };
   const alternarFamilia = (tab, clave, abierta) =>
     setFamiliasAbiertas({ ...familiasAbiertas, [tab + '|' + clave]: !abierta });
@@ -752,7 +763,7 @@ function Admin() {
         setDescuentoMayorista(config.data.descuento_mayorista);
       }
     }
-    if (celDisponibles.data) setStockCelulares(agruparStock(celDisponibles.data, claveCelular, (l) => ordenarPorPrecio(l, (c) => c.modelo, compararCelulares, (c) => marcaDeModelo(c.modelo))));
+    if (celDisponibles.data) setStockCelulares(agruparStock(celDisponibles.data, claveCelular, (l) => ordenarPorPrecio(l, (c) => familiaDeModelo(c.modelo), compararCelulares, (c) => marcaDeModelo(c.modelo))));
     if (accDisponibles.data) setStockAccesorios(agruparStock(accDisponibles.data, claveAccesorio, (l) => ordenarPorPrecio(l, (x) => x.tipo, compararAccesorios)));
 
     const ventasUnificadas = [
@@ -761,6 +772,11 @@ function Admin() {
     ];
     ventasUnificadas.sort((a, b) => new Date(b.fecha_venta) - new Date(a.fecha_venta));
     setVentasGlobales(ventasUnificadas);
+
+    const pagos = await traerTodo(() =>
+      supabase.from('pagos_revendedor').select('*').eq('aplicado', false).order('fecha')
+    );
+    setPagosRevendedor(pagos.error ? [] : pagos.data);
 
     setEnRevendedor([
       ...(celRevendedor.data || []).map((u) => ({ ...u, tabla: 'celulares' })),
@@ -1059,71 +1075,217 @@ function Admin() {
   const diasDesde = (fechaISO) => Math.max(0, Math.floor((Date.now() - new Date(fechaISO).getTime()) / 86400000));
 
   // Agrupa las unidades en consignacion por revendedor y, dentro de cada uno, por lote
-  // (mismo equipo, mismo precio acordado y mismo dia de entrega)
-  const gruposRevendedor = Object.values(
-    enRevendedor.reduce((acc, u) => {
-      const nombre = String(u.revendedor || '').trim() || 'Sin nombre';
+  // (mismo equipo, mismo precio acordado y mismo dia de entrega). Suma los pagos a cuenta
+  // de cada revendedor para calcular el saldo: deuda en USD menos lo entregado en USD.
+  const gruposRevendedor = (() => {
+    const grupos = {};
+    const grupo = (nombre) => {
       const k = normalizar(nombre);
+      if (!grupos[k]) grupos[k] = { nombre, unidades: 0, totalUsd: 0, lotes: {}, pagadoUsd: 0, pagadoArs: 0, pagos: 0 };
+      return grupos[k];
+    };
+    enRevendedor.forEach((u) => {
+      const g = grupo(String(u.revendedor || '').trim() || 'Sin nombre');
       const precio = precioAcordado(u);
-      if (!acc[k]) acc[k] = { nombre, unidades: 0, totalUsd: 0, lotes: {} };
-      acc[k].unidades += 1;
-      acc[k].totalUsd += precio;
+      g.unidades += 1;
+      g.totalUsd += precio;
       const kl = [u.tabla, u.tabla === 'celulares' ? claveCelular(u) : claveAccesorio(u), precio, diaEntrega(u)].join('|');
-      if (!acc[k].lotes[kl]) acc[k].lotes[kl] = { ...u, cantidad: 0, ids: [], precioUnidad: precio, precioTotal: 0 };
-      acc[k].lotes[kl].cantidad += 1;
-      acc[k].lotes[kl].ids.push(u.id);
-      acc[k].lotes[kl].precioTotal += precio;
-      return acc;
-    }, {})
-  )
-    .map((g) => ({ ...g, lotes: Object.values(g.lotes) }))
-    .sort((a, b) => comparar(a.nombre, b.nombre));
+      if (!g.lotes[kl]) g.lotes[kl] = { ...u, cantidad: 0, ids: [], precioUnidad: precio, precioTotal: 0 };
+      g.lotes[kl].cantidad += 1;
+      g.lotes[kl].ids.push(u.id);
+      g.lotes[kl].precioTotal += precio;
+    });
+    pagosRevendedor.forEach((pago) => {
+      const g = grupo(String(pago.revendedor || '').trim() || 'Sin nombre');
+      g.pagadoUsd += Number(pago.monto_usd) || 0;
+      g.pagadoArs += Number(pago.monto_ars) || 0;
+      g.pagos += 1;
+    });
+    return Object.values(grupos)
+      .map((g) => ({ ...g, lotes: Object.values(g.lotes), saldoUsd: g.totalUsd - g.pagadoUsd }))
+      .sort((a, b) => comparar(a.nombre, b.nombre));
+  })();
+
+  // Saldo menor a medio centavo de dolar se considera cubierto
+  const saldoCubierto = (saldoUsd) => saldoUsd < 0.005;
 
   const totalEnLaCalleUsd = gruposRevendedor.reduce((acc, g) => acc + g.totalUsd, 0);
 
-  const cantidadAsignacion = asignacion
-    ? Math.min(asignacion.item.cantidad, Math.max(1, parseInt(asignacion.cantidad) || 1))
-    : 0;
+  // ---------- Carrito de revendedor ----------
+  const loteDelCarrito = (c) =>
+    (c.tabla === 'celulares' ? stockCelulares : stockAccesorios).find((l) => String(l.ids[0]) === c.id);
 
-  async function asignarRevendedor() {
-    const { item, tabla } = asignacion;
-    const escrito = asignacion.nombre.trim();
+  const itemsCarrito = carrito
+    .map((c) => {
+      const lote = loteDelCarrito(c);
+      if (!lote) return null;
+      const cantidad = Math.min(lote.cantidad, Math.max(1, parseInt(c.cantidad) || 1));
+      const precioArs = parseFloat(c.precio);
+      return { ...c, lote, cantidad, precioArs, valido: precioArs >= 0 };
+    })
+    .filter(Boolean);
+  const totalCarritoArs = itemsCarrito.reduce((acc, i) => acc + (i.valido ? i.precioArs : 0) * i.cantidad, 0);
+  const unidadesCarrito = itemsCarrito.reduce((acc, i) => acc + i.cantidad, 0);
+  const entregadoCarritoArs = parseFloat(carritoEntregado) || 0;
+  const grupoCarrito = gruposRevendedor.find((g) => normalizar(g.nombre) === normalizar(carritoNombre));
+  const saldoPrevioArs = grupoCarrito ? grupoCarrito.saldoUsd * cot : 0;
+
+  const agregarAlCarrito = (item, tabla) => {
+    const id = String(item.ids[0]);
+    const existente = carrito.find((c) => c.id === id && c.tabla === tabla);
+    if (existente) {
+      if (existente.cantidad >= item.cantidad) {
+        toast.error('Ya estan en el carrito todas las unidades de ese lote');
+        return;
+      }
+      setCarrito(carrito.map((c) => (c === existente ? { ...c, cantidad: c.cantidad + 1 } : c)));
+    } else {
+      setCarrito([...carrito, { id, tabla, cantidad: 1, precio: Math.round(item.precio_usd * cot) }]);
+    }
+    toast.success('Agregado al carrito de revendedor');
+  };
+  const cambiarItemCarrito = (item, cambios) =>
+    setCarrito(carrito.map((c) => (c.id === item.id && c.tabla === item.tabla ? { ...c, ...cambios } : c)));
+  const quitarDelCarrito = (item) => setCarrito(carrito.filter((c) => !(c.id === item.id && c.tabla === item.tabla)));
+
+  // Marca como vendidas todas las unidades de un revendedor (al precio acordado de cada una)
+  // y da por aplicados sus pagos a cuenta. Lee la base para no depender de datos viejos.
+  async function cerrarCuentaRevendedor(nombre) {
+    for (const tabla of ['celulares', 'accesorios']) {
+      const { data, error } = await traerTodo(() =>
+        supabase.from(tabla).select('id, precio_usd, precio_revendedor').eq('estado', 'revendedor').eq('revendedor', nombre).order('id')
+      );
+      if (error) return { error };
+      const porPrecio = {};
+      (data || []).forEach((u) => {
+        const precio = precioAcordado(u);
+        (porPrecio[precio] = porPrecio[precio] || []).push(u.id);
+      });
+      for (const [precio, ids] of Object.entries(porPrecio)) {
+        const { error: errorVenta } = await marcarVendido(tabla, ids, { precio_usd: Number(precio) });
+        if (errorVenta) return { error: errorVenta };
+      }
+    }
+    return supabase.from('pagos_revendedor').update({ aplicado: true }).eq('revendedor', nombre).eq('aplicado', false);
+  }
+
+  async function registrarPagoRevendedor(nombre, montoArs) {
+    return supabase.from('pagos_revendedor').insert({
+      revendedor: nombre,
+      monto_ars: redondear(montoArs),
+      cotizacion: cot,
+      monto_usd: redondear(montoArs / cot),
+    });
+  }
+
+  async function confirmarCarrito() {
+    const escrito = carritoNombre.trim();
     if (!escrito) {
-      toast.error('Indica el nombre del revendedor');
+      toast.error('Coloque el nombre del revendedor');
       return;
     }
-    // Si ya existe un revendedor con ese nombre, se usa la misma escritura para no duplicarlo
-    const existente = gruposRevendedor.find((g) => normalizar(g.nombre) === normalizar(escrito));
-    const nombre = existente ? existente.nombre : escrito;
-    // El precio se carga en pesos por unidad y se guarda en USD con la cotizacion actual
-    const precioArs = parseFloat(asignacion.precio);
-    if (!(precioArs >= 0)) {
-      toast.error('Indica el precio acordado con el revendedor');
+    if (itemsCarrito.length === 0) {
+      toast.error('El carrito esta vacio');
+      return;
+    }
+    if (itemsCarrito.some((i) => !i.valido)) {
+      toast.error('Revisa los precios del carrito');
       return;
     }
     if (!cot) {
       toast.error('La cotizacion debe ser mayor a cero');
       return;
     }
-    const precio = precioArs / cot;
-    const ids = item.ids.slice(0, cantidadAsignacion);
-    setAsignacion(null);
-    const { error } = await porTandas(ids, (tanda) => supabase
-      .from(tabla)
-      .update({
-        estado: 'revendedor',
-        revendedor: nombre,
-        precio_revendedor: redondear(precio),
-        fecha_revendedor: new Date().toISOString(),
-      })
-      .in('id', tanda));
-    if (error) {
-      toast.error('Error al asignar: ' + error.message);
-      return;
+    // Si ya existe un revendedor con ese nombre, se usa la misma escritura para no duplicarlo
+    const nombre = grupoCarrito ? grupoCarrito.nombre : escrito;
+    const saldoFinalUsd = (grupoCarrito ? grupoCarrito.saldoUsd : 0) + totalCarritoArs / cot - entregadoCarritoArs / cot;
+    const fecha = new Date().toISOString();
+
+    for (const item of itemsCarrito) {
+      const { error } = await porTandas(item.lote.ids.slice(0, item.cantidad), (tanda) =>
+        supabase
+          .from(item.tabla)
+          .update({ estado: 'revendedor', revendedor: nombre, precio_revendedor: redondear(item.precioArs / cot), fecha_revendedor: fecha })
+          .in('id', tanda)
+      );
+      if (error) {
+        toast.error('Error al asignar: ' + error.message);
+        cargarDatos(false);
+        return;
+      }
     }
-    toast.success(ids.length + ' unidad(es) asignada(s) a ' + nombre);
+
+    if (entregadoCarritoArs > 0) {
+      const { error } = await registrarPagoRevendedor(nombre, entregadoCarritoArs);
+      if (error) toast.error('Los equipos se asignaron, pero no se pudo guardar el monto entregado: ' + error.message);
+    }
+
+    if (saldoCubierto(saldoFinalUsd)) {
+      const { error } = await cerrarCuentaRevendedor(nombre);
+      if (error) toast.error('No se pudo cerrar la cuenta: ' + error.message);
+      else toast.success('Pago completo: los equipos de ' + nombre + ' quedaron como vendidos');
+    } else {
+      toast.success(unidadesCarrito + ' unidad(es) entregada(s) a ' + nombre + '. Saldo: ARS $ ' + fmt(Math.round(saldoFinalUsd * cot)));
+    }
+    setCarrito([]);
+    setCarritoNombre('');
+    setCarritoEntregado('');
+    setCarritoAbierto(false);
     cargarDatos(false);
   }
+
+  // ---------- Pagos a cuenta de un revendedor ----------
+  const grupoPago = pagoRevendedor ? gruposRevendedor.find((g) => g.nombre === pagoRevendedor.nombre) : null;
+  const montoPagoArs = pagoRevendedor ? parseFloat(pagoRevendedor.monto) || 0 : 0;
+  const saldoTrasPagoUsd = grupoPago ? grupoPago.saldoUsd - (cot ? montoPagoArs / cot : 0) : 0;
+
+  async function confirmarPagoRevendedor() {
+    const { nombre } = pagoRevendedor;
+    if (!(montoPagoArs > 0)) {
+      toast.error('Indica el monto que entrego');
+      return;
+    }
+    if (!cot) {
+      toast.error('La cotizacion debe ser mayor a cero');
+      return;
+    }
+    const saldoFinal = saldoTrasPagoUsd;
+    setPagoRevendedor(null);
+    const { error } = await registrarPagoRevendedor(nombre, montoPagoArs);
+    if (error) {
+      toast.error('Error al registrar el pago: ' + error.message);
+      return;
+    }
+    if (saldoCubierto(saldoFinal) && grupoPago.unidades > 0) {
+      const { error: errorCierre } = await cerrarCuentaRevendedor(nombre);
+      if (errorCierre) toast.error('El pago se guardo, pero no se pudo cerrar la cuenta: ' + errorCierre.message);
+      else toast.success('Saldo cubierto: los equipos de ' + nombre + ' quedaron como vendidos');
+    } else {
+      toast.success('Pago registrado. Saldo de ' + nombre + ': ARS $ ' + fmt(Math.round(saldoFinal * cot)));
+    }
+    cargarDatos(false);
+  }
+
+  const confirmarCierreCuenta = (g) =>
+    setDialogo({
+      titulo: 'Cerrar la cuenta de ' + g.nombre,
+      texto:
+        g.unidades > 0
+          ? 'Sus ' + g.unidades + ' unidad(es) pasan al historial de ventas al precio acordado y los pagos a cuenta se dan por aplicados.'
+          : 'No tiene equipos en su poder. Los pagos a cuenta se dan por aplicados y la cuenta queda en cero.',
+      botones: [
+        {
+          etiqueta: 'Cerrar cuenta',
+          clase: 'bg-green-600 hover:bg-green-700',
+          accion: async () => {
+            const { error } = await cerrarCuentaRevendedor(g.nombre);
+            if (error) toast.error('No se pudo cerrar la cuenta: ' + error.message);
+            else toast.success('Cuenta de ' + g.nombre + ' cerrada');
+            cargarDatos(false);
+          },
+        },
+      ],
+    });
 
   // El revendedor rinde la plata (pasa a vendido, al precio acordado) o devuelve el equipo
   // (vuelve al stock con su precio de venta original)
@@ -1516,7 +1678,7 @@ function Admin() {
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
               <EncabezadoStock titulo="Stock de Celulares" columna="Equipo" stats={statsCelulares} lotes={stockCelulares.length} busqueda={busquedaStock} onBusqueda={setBusquedaStock} />
               <div className="divide-y divide-gray-100 md:max-h-[400px] md:overflow-y-auto">
-                {agruparFamilias(celularesVisibles, 'modelo').map((familia) => {
+                {agruparFamilias(celularesVisibles, (c) => familiaDeModelo(c.modelo)).map((familia) => {
                   const abierta = familiaAbierta('celulares', familia.clave);
                   return (
                     <Fragment key={familia.clave}>
@@ -1642,7 +1804,7 @@ function Admin() {
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
               <EncabezadoStock titulo="Stock de Accesorios" columna="Accesorio" stats={statsAccesorios} lotes={stockAccesorios.length} busqueda={busquedaStock} onBusqueda={setBusquedaStock} />
               <div className="divide-y divide-gray-100 md:max-h-[400px] md:overflow-y-auto">
-                {agruparFamilias(accesoriosVisibles, 'tipo').map((familia) => {
+                {agruparFamilias(accesoriosVisibles, (x) => x.tipo).map((familia) => {
                   const abierta = familiaAbierta('accesorios', familia.clave);
                   return (
                     <Fragment key={familia.clave}>
@@ -1728,7 +1890,7 @@ function Admin() {
                 <p className="font-black text-lg md:text-2xl text-green-600 break-words">$ {fmt(Math.round(totalEnLaCalleUsd * cot))}</p>
               </div>
               <p className="col-span-2 md:col-span-3 text-[11px] text-gray-400">
-                Equipos entregados a consignacion. Siguen apareciendo en el catalogo publico (con una "R" cuando es la unica unidad), pero no en el stock disponible. Para sumar uno, usa Opciones y luego "A revendedor" en el stock.
+                Equipos entregados a consignacion. Siguen apareciendo en el catalogo publico (con una "R" cuando es la unica unidad), pero no en el stock disponible. Para entregar equipos, usa Opciones y luego "Al carrito revendedor" en el stock.
               </p>
             </div>
 
@@ -1746,9 +1908,39 @@ function Admin() {
                     <p className="text-xs font-semibold text-gray-500">{g.unidades} unidad(es) en su poder</p>
                   </div>
                   <div className="text-right">
-                    <p className="text-base md:text-lg font-black text-purple-700">USD {fmt(g.totalUsd)}</p>
-                    <p className="text-xs font-bold text-gray-600">ARS $ {fmt(Math.round(g.totalUsd * cot))}</p>
+                    <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">
+                      {g.saldoUsd < -0.005 ? 'A su favor' : 'Saldo pendiente'}
+                    </p>
+                    <p className="text-base md:text-lg font-black text-purple-700">ARS $ {fmt(Math.round(Math.abs(g.saldoUsd) * cot))}</p>
+                    <p className="text-xs font-bold text-gray-500">USD {fmt(Math.abs(g.saldoUsd))}</p>
                   </div>
+                </div>
+                <div className="px-3 md:px-4 py-2 border-b border-gray-200 grid grid-cols-2 gap-2 text-xs font-semibold text-gray-600">
+                  <span>
+                    Total equipos: <span className="font-bold text-gray-900">ARS $ {fmt(Math.round(g.totalUsd * cot))}</span>
+                  </span>
+                  <span className="text-right">
+                    Entregado: <span className="font-bold text-gray-900">ARS $ {fmt(Math.round(g.pagadoArs))}</span>
+                    {g.pagos > 0 ? ' (' + g.pagos + ' pago(s))' : ''}
+                  </span>
+                </div>
+                <div className="px-3 md:px-4 py-2 border-b border-gray-200 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPagoRevendedor({ nombre: g.nombre, monto: '' })}
+                    className="flex-1 md:flex-none bg-green-600 text-white px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-green-700 transition"
+                  >
+                    Registrar pago
+                  </button>
+                  {saldoCubierto(g.saldoUsd) && (
+                    <button
+                      type="button"
+                      onClick={() => confirmarCierreCuenta(g)}
+                      className="flex-1 md:flex-none bg-gray-900 text-white px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-gray-800 transition"
+                    >
+                      Cerrar cuenta
+                    </button>
+                  )}
                 </div>
                 <div className="divide-y divide-gray-100">
                   {g.lotes.map((lote) => (
@@ -1784,12 +1976,6 @@ function Admin() {
                         )}
                       </div>
                       <div className="flex gap-2">
-                        <button
-                          onClick={() => confirmarResolucion(lote, 'vendido')}
-                          className="flex-1 md:flex-none bg-green-600 text-white px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-green-700 transition"
-                        >
-                          Pago (vendido)
-                        </button>
                         <button
                           onClick={() => confirmarResolucion(lote, 'disponible')}
                           className="flex-1 md:flex-none bg-gray-200 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-gray-300 transition"
@@ -2051,11 +2237,11 @@ function Admin() {
                 onClick={() => {
                   const { item, tabla } = menu;
                   setMenu(null);
-                  setAsignacion({ item, tabla, nombre: '', cantidad: 1, precio: Math.round(item.precio_usd * cot) });
+                  agregarAlCarrito(item, tabla);
                 }}
                 className="px-4 py-3 text-sm font-bold text-gray-900 bg-white hover:bg-gray-100 text-left border-b border-gray-50"
               >
-                A revendedor
+                Al carrito revendedor
               </button>
               <button
                 onClick={() => {
@@ -2072,25 +2258,34 @@ function Admin() {
         </Fragment>
       )}
 
-      {/* MODAL: ASIGNAR A REVENDEDOR */}
-      {asignacion && (
+      {/* BOTON FLOTANTE DEL CARRITO */}
+      {carrito.length > 0 && !carritoAbierto && (
+        <button
+          type="button"
+          onClick={() => setCarritoAbierto(true)}
+          className="fixed bottom-4 right-4 z-30 bg-gray-900 text-white px-4 py-3 rounded-full shadow-xl text-sm font-bold hover:bg-gray-800 transition"
+        >
+          Carrito revendedor ({unidadesCarrito})
+        </button>
+      )}
+
+      {/* MODAL: CARRITO DE REVENDEDOR */}
+      {carritoAbierto && (
         <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
           <form
-            onSubmit={conBloqueo(asignarRevendedor)}
+            onSubmit={conBloqueo(confirmarCarrito)}
             autoComplete="off"
-            className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto"
           >
-            <h2 className="text-xl font-bold text-gray-800">Asignar a revendedor</h2>
-            <p className="text-sm font-semibold text-gray-600 mt-1 break-words">{nombreItem(asignacion.item, asignacion.tabla)}</p>
+            <h2 className="text-xl font-bold text-gray-800">Carrito revendedor</h2>
 
             <label className="text-xs font-bold text-gray-600 mt-4 mb-1 block">Nombre del revendedor</label>
             <input
               required
-              autoFocus
               type="text"
               list="lista-revendedores"
-              value={asignacion.nombre}
-              onChange={(e) => setAsignacion({ ...asignacion, nombre: e.target.value })}
+              value={carritoNombre}
+              onChange={(e) => setCarritoNombre(e.target.value)}
               placeholder="Coloque nombre del revendedor"
               className={claseInputModal}
             />
@@ -2100,65 +2295,174 @@ function Admin() {
               ))}
             </datalist>
 
-            {asignacion.item.cantidad > 1 && (
-              <Fragment>
-                <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">
-                  Cuantas unidades le entregas? (hay {asignacion.item.cantidad} en stock)
-                </label>
-                <div className="flex items-stretch gap-2">
-                  <input
-                    type="number"
-                    min="1"
-                    max={asignacion.item.cantidad}
-                    value={asignacion.cantidad}
-                    onChange={(e) => setAsignacion({ ...asignacion, cantidad: e.target.value })}
-                    onBlur={() => setAsignacion({ ...asignacion, cantidad: cantidadAsignacion })}
-                    className="flex-1 min-w-0 border border-gray-300 rounded-lg p-2.5 text-center text-lg font-black text-gray-800 outline-none focus:border-blue-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setAsignacion({ ...asignacion, cantidad: asignacion.item.cantidad })}
-                    className="shrink-0 bg-gray-200 text-gray-800 px-3 rounded-lg text-xs font-bold hover:bg-gray-300"
-                  >
-                    Todas
-                  </button>
-                </div>
-              </Fragment>
+            {itemsCarrito.length === 0 ? (
+              <p className="mt-4 text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded-lg p-3">
+                El carrito esta vacio. Agrega equipos desde Opciones y luego "Al carrito revendedor".
+              </p>
+            ) : (
+              <ul className="mt-4 space-y-2">
+                {itemsCarrito.map((i) => (
+                  <li key={i.tabla + '-' + i.id} className="bg-gray-50 border border-gray-200 rounded-lg p-2.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="min-w-0 text-xs font-bold text-gray-800 break-words">
+                        {nombreItem(i.lote, i.tabla)}
+                        <span className="block text-[11px] font-semibold text-gray-500">
+                          Lista: ARS $ {fmt(Math.round(i.lote.precio_usd * cot))} c/u - hay {i.lote.cantidad} en stock
+                        </span>
+                      </span>
+                      <button type="button" onClick={() => quitarDelCarrito(i)} className="shrink-0 text-xs font-bold text-red-500 hover:underline px-1">
+                        Quitar
+                      </button>
+                    </div>
+                    <div className="mt-2 flex items-stretch gap-2">
+                      <div className="shrink-0 inline-flex items-center border border-gray-300 rounded-lg overflow-hidden bg-white">
+                        <button
+                          type="button"
+                          aria-label="Restar una unidad"
+                          disabled={i.cantidad <= 1}
+                          onClick={() => cambiarItemCarrito(i, { cantidad: i.cantidad - 1 })}
+                          className="w-8 h-9 font-black text-gray-700 hover:bg-gray-100 disabled:opacity-30"
+                        >
+                          -
+                        </button>
+                        <span className="min-w-7 px-1 text-center text-sm font-bold text-gray-800">{i.cantidad}</span>
+                        <button
+                          type="button"
+                          aria-label="Sumar una unidad"
+                          disabled={i.cantidad >= i.lote.cantidad}
+                          onClick={() => cambiarItemCarrito(i, { cantidad: i.cantidad + 1 })}
+                          className="w-8 h-9 font-black text-gray-700 hover:bg-gray-100 disabled:opacity-30"
+                        >
+                          +
+                        </button>
+                      </div>
+                      <InputPesos
+                        value={i.precio}
+                        onChange={(precio) => cambiarItemCarrito(i, { precio })}
+                        aria-label="Precio por unidad para el revendedor, en pesos"
+                        placeholder="Precio por unidad (ARS)"
+                        className="flex-1 min-w-0 border border-gray-300 rounded-lg px-2 bg-white text-base md:text-sm font-bold text-gray-800 outline-none focus:border-blue-500"
+                      />
+                    </div>
+                    <p className="mt-1.5 text-right text-xs font-bold text-gray-700">
+                      {i.cantidad} x $ {fmt(i.valido ? i.precioArs : 0)} = ARS $ {fmt(Math.round((i.valido ? i.precioArs : 0) * i.cantidad))}
+                    </p>
+                  </li>
+                ))}
+              </ul>
             )}
 
-            <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">
-              Precio por unidad para el revendedor (pesos ARS)
-            </label>
+            <div className="mt-3 bg-purple-50 border border-purple-100 rounded-lg p-3 space-y-1">
+              <div className="flex justify-between gap-2 text-base font-black text-purple-800">
+                <span>Total ({unidadesCarrito} u.)</span>
+                <span>ARS $ {fmt(Math.round(totalCarritoArs))}</span>
+              </div>
+              <p className="text-right text-xs font-bold text-gray-500">{cot ? 'USD ' + fmt(totalCarritoArs / cot) : ''}</p>
+            </div>
+
+            <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">Monto entregado ahora (pesos ARS)</label>
             <InputPesos
-              required
-              value={asignacion.precio}
-              onChange={(precio) => setAsignacion({ ...asignacion, precio })}
+              value={carritoEntregado}
+              onChange={setCarritoEntregado}
+              placeholder="0 si no entrego nada"
               className={claseInputModal + ' font-bold'}
             />
-            <p className="text-[11px] font-medium text-gray-500 mt-1">
-              Precio de venta al publico: ARS $ {fmt(Math.round(asignacion.item.precio_usd * cot))} por unidad. Este precio se aplica a cada una de las {cantidadAsignacion} unidad(es) que le entregas.
-            </p>
 
-            <div className="mt-3 bg-purple-50 border border-purple-100 rounded-lg p-3">
-              <div className="flex justify-between gap-2 text-base font-black text-purple-800">
-                <span>Queda debiendo</span>
-                <span>ARS $ {fmt(Math.round((Number(asignacion.precio) || 0) * cantidadAsignacion))}</span>
+            <div className="mt-3 bg-gray-50 border border-gray-200 rounded-lg p-3 space-y-1 text-xs font-semibold text-gray-600">
+              {grupoCarrito && (
+                <div className="flex justify-between gap-2">
+                  <span>Saldo que ya tenia {grupoCarrito.nombre}</span>
+                  <span>ARS $ {fmt(Math.round(saldoPrevioArs))}</span>
+                </div>
+              )}
+              <div className="flex justify-between gap-2 text-base font-black text-gray-900">
+                <span>Saldo pendiente</span>
+                <span>ARS $ {fmt(Math.round(saldoPrevioArs + totalCarritoArs - entregadoCarritoArs))}</span>
               </div>
-              <p className="text-right text-xs font-bold text-gray-500 mt-0.5">
-                {cantidadAsignacion} u. x $ {fmt(Number(asignacion.precio) || 0)}
-                {cot ? ' = USD ' + fmt(((Number(asignacion.precio) || 0) * cantidadAsignacion) / cot) : ''}
+              <p className="text-[11px] font-medium text-gray-500">
+                Los equipos salen del stock disponible y siguen en el catalogo publico. Cuando el saldo llega a cero, pasan solos al historial de ventas.
               </p>
-              <p className="text-[11px] font-medium text-purple-700 mt-2">
-                El equipo sale del stock disponible pero sigue apareciendo en el catalogo publico. No se cuenta como vendido hasta que el revendedor pague.
+            </div>
+
+            <div className="flex flex-wrap gap-2 mt-4">
+              <button
+                type="button"
+                onClick={() => { setCarrito([]); setCarritoAbierto(false); }}
+                className="flex-1 bg-white border border-gray-300 text-red-500 px-3 py-2.5 rounded-lg text-sm font-bold hover:bg-red-50 transition"
+              >
+                Vaciar
+              </button>
+              <button
+                type="button"
+                onClick={() => setCarritoAbierto(false)}
+                className="flex-1 bg-gray-200 text-gray-800 px-3 py-2.5 rounded-lg text-sm font-bold hover:bg-gray-300 transition"
+              >
+                Seguir agregando
+              </button>
+              <button
+                type="submit"
+                disabled={guardando || itemsCarrito.length === 0}
+                className="disabled:opacity-60 w-full bg-purple-600 text-white px-4 py-3 rounded-lg font-bold shadow-sm hover:bg-purple-700 transition"
+              >
+                Confirmar entrega
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* MODAL: PAGO A CUENTA DE UN REVENDEDOR */}
+      {pagoRevendedor && grupoPago && (
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <form
+            onSubmit={conBloqueo(confirmarPagoRevendedor)}
+            autoComplete="off"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto"
+          >
+            <h2 className="text-xl font-bold text-gray-800">Registrar pago</h2>
+            <p className="text-sm font-semibold text-gray-600 mt-1 break-words">{grupoPago.nombre}</p>
+
+            <div className="mt-3 flex justify-between gap-2 text-sm font-semibold text-gray-600">
+              <span>Saldo actual</span>
+              <span className="font-black text-gray-900">ARS $ {fmt(Math.round(grupoPago.saldoUsd * cot))}</span>
+            </div>
+
+            <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">Monto que entrega (pesos ARS)</label>
+            <InputPesos
+              required
+              autoFocus
+              value={pagoRevendedor.monto}
+              onChange={(monto) => setPagoRevendedor({ ...pagoRevendedor, monto })}
+              className={claseInputModal + ' font-bold'}
+            />
+            {grupoPago.saldoUsd > 0 && (
+              <button
+                type="button"
+                onClick={() => setPagoRevendedor({ ...pagoRevendedor, monto: Math.round(grupoPago.saldoUsd * cot) })}
+                className="mt-2 text-xs font-bold text-blue-600 hover:underline py-1"
+              >
+                Paga todo el saldo
+              </button>
+            )}
+
+            <div className="mt-3 bg-gray-50 border border-gray-200 rounded-lg p-3">
+              <div className="flex justify-between gap-2 text-base font-black text-gray-900">
+                <span>{saldoTrasPagoUsd < -0.005 ? 'Queda a su favor' : 'Saldo despues del pago'}</span>
+                <span>ARS $ {fmt(Math.round(Math.abs(saldoTrasPagoUsd) * cot))}</span>
+              </div>
+              <p className="text-[11px] font-medium text-gray-500 mt-1">
+                {saldoCubierto(saldoTrasPagoUsd) && grupoPago.unidades > 0
+                  ? 'Con este pago el saldo queda cubierto: sus equipos pasan al historial de ventas.'
+                  : 'El pago se guarda con la cotizacion de hoy.'}
               </p>
             </div>
 
             <div className="flex gap-3 mt-4">
-              <button type="button" onClick={() => setAsignacion(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
+              <button type="button" onClick={() => setPagoRevendedor(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
                 Cancelar
               </button>
-              <button type="submit" disabled={guardando} className="disabled:opacity-60 flex-1 bg-purple-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-purple-700 transition">
-                Asignar
+              <button type="submit" disabled={guardando} className="disabled:opacity-60 flex-1 bg-green-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-green-700 transition">
+                Registrar
               </button>
             </div>
           </form>
