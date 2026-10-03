@@ -699,6 +699,7 @@ function Admin() {
   const [esEscritorio] = useState(() => window.matchMedia('(min-width: 768px)').matches);
   const [formAbierto, setFormAbierto] = useState(null); // null = segun el tamano de pantalla
   const [familiasAbiertas, setFamiliasAbiertas] = useState({});
+  const [revAbiertos, setRevAbiertos] = useState({}); // revendedores desplegados (todos arrancan cerrados)
   const [carrito, setCarrito] = useState([]); // [{ id, tabla, cantidad, precio (ARS por unidad) }]
   const [carritoAbierto, setCarritoAbierto] = useState(false);
   const [carritoNombre, setCarritoNombre] = useState('');
@@ -871,8 +872,8 @@ function Admin() {
     ventasFiltradas.forEach((v) => {
       const fecha = v.fecha_venta ? new Date(v.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha';
       const ganancia = (v.precio_usd - v.costo_usd).toFixed(2);
-      const cat = v.categoria === 'celular' ? 'Celular' : 'Accesorio';
-      const producto = v.categoria === 'celular' ? v.modelo + ' ' + v.capacidad : v.tipo + ' ' + v.modelo;
+      const cat = v.categoria === 'celular' ? 'Celular' : v.categoria === 'cobro' ? 'Cobro a cuenta (estimado)' : 'Accesorio';
+      const producto = v.categoria === 'celular' ? v.modelo + ' ' + v.capacidad : v.categoria === 'cobro' ? v.revendedor : v.tipo + ' ' + v.modelo;
       csv += [escaparCsv(cat), escaparCsv(producto), escaparCsv(v.color), escaparCsv(fecha), v.costo_usd, v.precio_usd, ganancia, cotizacionDe(v), Math.round(v.precio_usd * cotizacionDe(v))].join(',') + '\n';
     });
 
@@ -1143,7 +1144,7 @@ function Admin() {
       const k = normalizar(nombre);
       if (!grupos[k]) {
         grupos[k] = {
-          nombre, unidades: 0, totalUsd: 0, lotes: {}, pagadoUsd: 0, pagadoArs: 0, pagos: 0, aplicadoUsd: 0, aplicadoArs: 0,
+          nombre, unidades: 0, totalUsd: 0, costoTotalUsd: 0, lotes: {}, pagadoUsd: 0, pagadoArs: 0, pagos: 0, aplicadoUsd: 0, aplicadoArs: 0,
           celular: '', idLista: null,
         };
       }
@@ -1154,6 +1155,7 @@ function Admin() {
       const precio = precioAcordado(u);
       g.unidades += 1;
       g.totalUsd += precio;
+      g.costoTotalUsd += Number(u.costo_usd) || 0;
       const kl = [u.tabla, u.tabla === 'celulares' ? claveCelular(u) : claveAccesorio(u), precio, diaEntrega(u)].join('|');
       if (!g.lotes[kl]) g.lotes[kl] = { ...u, cantidad: 0, ids: [], precioUnidad: precio, precioTotal: 0 };
       g.lotes[kl].cantidad += 1;
@@ -1185,9 +1187,52 @@ function Admin() {
         // Credito = lo entregado que todavia no se aplico a ningun equipo
         const creditoUsd = g.pagadoUsd - g.aplicadoUsd;
         const creditoArs = g.pagadoArs - g.aplicadoArs;
-        return { ...g, lotes: Object.values(g.lotes), creditoUsd, creditoArs, saldoUsd: g.totalUsd - creditoUsd };
+        // Margen = parte del precio acordado que es ganancia, sobre todos los equipos que tiene
+        const margen = g.totalUsd > 0 ? (g.totalUsd - g.costoTotalUsd) / g.totalUsd : 0;
+        return { ...g, lotes: Object.values(g.lotes), creditoUsd, creditoArs, margen, saldoUsd: g.totalUsd - creditoUsd };
       })
       .sort((a, b) => comparar(a.nombre, b.nombre));
+  })();
+
+  // Cobros a cuenta de los revendedores, para sumarlos a los ingresos y a la ganancia de la
+  // pestana Ventas apenas se cobran. Cada cobro se trata como una venta parcial: ingreso = lo
+  // cobrado y ganancia = lo cobrado x margen de los equipos que ese revendedor tiene (estimada).
+  // Lo que ya se aplico a equipos pagados (filas negativas) se descuenta de los cobros mas viejos,
+  // porque esos equipos ya figuran como ventas reales: asi no se cuenta dos veces.
+  const cobrosEstimados = (() => {
+    const porRevendedor = {};
+    pagosRevendedor.forEach((p) => {
+      const k = normalizar(String(p.revendedor || '').trim() || 'Sin nombre');
+      (porRevendedor[k] = porRevendedor[k] || []).push(p);
+    });
+    const eventos = [];
+    Object.entries(porRevendedor).forEach(([k, filas]) => {
+      const g = gruposRevendedor.find((x) => normalizar(x.nombre) === k);
+      const margen = g ? g.margen : 0;
+      let aDescontarUsd = filas.reduce((acc, p) => acc + (Number(p.monto_usd) < 0 ? -Number(p.monto_usd) : 0), 0);
+      filas
+        .filter((p) => Number(p.monto_usd) > 0)
+        .sort((a, b) => new Date(a.fecha) - new Date(b.fecha))
+        .forEach((p) => {
+          const usd = Number(p.monto_usd);
+          const ars = Number(p.monto_ars) || 0;
+          const quita = Math.min(usd, aDescontarUsd);
+          aDescontarUsd -= quita;
+          const restoUsd = usd - quita;
+          if (restoUsd < 0.005) return;
+          const restoArs = ars * (restoUsd / usd);
+          eventos.push({
+            id: p.id,
+            categoria: 'cobro',
+            revendedor: g ? g.nombre : String(p.revendedor || '').trim(),
+            fecha_venta: p.fecha,
+            precio_usd: restoUsd,
+            costo_usd: restoUsd * (1 - margen),
+            cotizacion_venta: restoArs / restoUsd,
+          });
+        });
+    });
+    return eventos;
   })();
 
   // Saldo menor a medio centavo de dolar se considera cubierto
@@ -1470,6 +1515,11 @@ function Admin() {
 
   // ---------- Lista de revendedores ----------
   const tieneMovimientos = (g) => g.unidades > 0 || g.pagos > 0 || g.aplicadoArs > 0;
+
+  const alternarRevendedor = (g) => {
+    const clave = normalizar(g.nombre);
+    setRevAbiertos({ ...revAbiertos, [clave]: !revAbiertos[clave] });
+  };
 
   const abrirAltaRevendedor = () => setRevForm({ id: null, nombre: '', celular: '', bloqueaNombre: false });
 
@@ -1794,17 +1844,25 @@ function Admin() {
   const celularesVisibles = filtrarStock(stockCelulares, ['modelo', 'capacidad', 'color', 'detalles']);
   const accesoriosVisibles = filtrarStock(stockAccesorios, ['tipo', 'modelo', 'color', 'detalles']);
 
-  const mesesDisponibles = [...new Set(ventasGlobales.map((v) => obtenerMesAnio(v.fecha_venta)))]
+  // Ventas reales mas cobros a cuenta de revendedores (estimados), del mas nuevo al mas viejo
+  const movimientosGlobales = [...ventasGlobales, ...cobrosEstimados].sort(
+    (a, b) => new Date(b.fecha_venta) - new Date(a.fecha_venta)
+  );
+
+  const mesesDisponibles = [...new Set(movimientosGlobales.map((v) => obtenerMesAnio(v.fecha_venta)))]
     .filter((m) => m !== 'Sin fecha')
     .sort()
     .reverse();
 
   const ventasFiltradas =
     mesSeleccionado === 'todos'
-      ? ventasGlobales
-      : ventasGlobales.filter((v) => obtenerMesAnio(v.fecha_venta) === mesSeleccionado);
+      ? movimientosGlobales
+      : movimientosGlobales.filter((v) => obtenerMesAnio(v.fecha_venta) === mesSeleccionado);
 
-  const totalVendidos = ventasFiltradas.length;
+  // Los cobros a cuenta no son unidades vendidas: no suman en "Items vendidos"
+  const totalVendidos = ventasFiltradas.filter((v) => v.categoria !== 'cobro').length;
+  const cobrosFiltrados = ventasFiltradas.filter((v) => v.categoria === 'cobro');
+  const gananciaCobrosUSD = cobrosFiltrados.reduce((acc, v) => acc + (v.precio_usd - v.costo_usd), 0);
   const gananciaVentasUSD = ventasFiltradas.reduce((acc, item) => acc + (item.precio_usd - item.costo_usd), 0);
   const gananciaVentasARS = ventasFiltradas.reduce((acc, item) => acc + (item.precio_usd - item.costo_usd) * cotizacionDe(item), 0);
 
@@ -1816,17 +1874,20 @@ function Admin() {
   // Total vendido por mes (ultimos 12 meses con ventas), en pesos a la cotizacion de cada
   // venta (las que no tienen ese dato usan la actual).
   const resumenMensual = mesesDisponibles.slice(0, 12).map((mes) => {
-    const ventasMes = ventasGlobales.filter((v) => obtenerMesAnio(v.fecha_venta) === mes);
+    const ventasMes = movimientosGlobales.filter((v) => obtenerMesAnio(v.fecha_venta) === mes);
     const totalUsd = ventasMes.reduce((acc, v) => acc + (Number(v.precio_usd) || 0), 0);
     const totalArs = ventasMes.reduce((acc, v) => acc + (Number(v.precio_usd) || 0) * cotizacionDe(v), 0);
-    return { mes, unidades: ventasMes.length, totalUsd, totalArs };
+    const cobrosArs = ventasMes
+      .filter((v) => v.categoria === 'cobro')
+      .reduce((acc, v) => acc + (Number(v.precio_usd) || 0) * cotizacionDe(v), 0);
+    return { mes, unidades: ventasMes.filter((v) => v.categoria !== 'cobro').length, totalUsd, totalArs, cobrosArs };
   });
 
   const gananciaPorMes = mesesDisponibles
     .slice(0, 6)
     .reverse()
     .map((mes) => {
-      const ventasMes = ventasGlobales.filter((v) => obtenerMesAnio(v.fecha_venta) === mes);
+      const ventasMes = movimientosGlobales.filter((v) => obtenerMesAnio(v.fecha_venta) === mes);
       const ganancia = ventasMes.reduce((acc, c) => acc + (c.precio_usd - c.costo_usd), 0);
       const [, month] = mes.split('-');
       return { name: MESES[parseInt(month) - 1] + ' ' + mes.slice(0, 4), Ganancia: redondear(ganancia) };
@@ -1837,7 +1898,7 @@ function Admin() {
   const gananciaPorModelo = (() => {
     const totales = {};
     ventasFiltradas.forEach((v) => {
-      const nombre = String((v.categoria === 'celular' ? v.modelo : v.tipo) || 'Sin nombre').trim();
+      const nombre = String((v.categoria === 'celular' ? v.modelo : v.categoria === 'cobro' ? 'Cobros a cuenta (estimado)' : v.tipo) || 'Sin nombre').trim();
       totales[nombre] = (totales[nombre] || 0) + (v.precio_usd - v.costo_usd);
     });
     const ordenados = Object.entries(totales)
@@ -2223,26 +2284,44 @@ function Admin() {
               </div>
             )}
 
-            {gruposRevendedor.map((g) => (
+            {gruposRevendedor.map((g) => {
+              const abierto = revAbiertos[normalizar(g.nombre)] === true;
+              return (
               <div key={g.nombre} className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-                <div className="px-3 md:px-4 py-3 border-b border-gray-200 bg-purple-50 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
-                  <div className="min-w-0">
-                    <h2 className="text-lg font-bold text-gray-900 break-words">{g.nombre}</h2>
-                    <p className="text-xs font-semibold text-gray-500">{g.unidades} unidad(es) en su poder</p>
-                    {g.celular && (
-                      <a href={'tel:' + g.celular.replace(/[^\d+]/g, '')} className="text-xs font-semibold text-blue-600 hover:underline">
-                        {g.celular}
-                      </a>
-                    )}
-                  </div>
-                  <div className="text-right">
-                    <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">
+                <button
+                  type="button"
+                  onClick={() => alternarRevendedor(g)}
+                  aria-expanded={abierto}
+                  className={
+                    'w-full px-3 md:px-4 py-3 bg-purple-50 hover:bg-purple-100 flex items-center gap-3 text-left transition' +
+                    (abierto ? ' border-b border-gray-200' : '')
+                  }
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-lg font-bold text-gray-900 break-words leading-tight">{g.nombre}</span>
+                    <span className="block text-xs font-semibold text-gray-500 mt-0.5">
+                      {g.unidades} unidad(es) en su poder
+                    </span>
+                  </span>
+                  <span className="shrink-0 text-right">
+                    <span className="block text-[11px] font-bold text-gray-500 uppercase tracking-wide">
                       {g.saldoUsd < -0.005 ? 'A su favor' : 'Saldo pendiente'}
-                    </p>
-                    <p className="text-base md:text-lg font-black text-purple-700">ARS $ {fmt(Math.round(Math.abs(g.saldoUsd) * cot))}</p>
-                    <p className="text-xs font-bold text-gray-500">USD {fmt(Math.abs(g.saldoUsd))}</p>
+                    </span>
+                    <span className="block text-base md:text-lg font-black text-purple-700">ARS $ {fmt(Math.round(Math.abs(g.saldoUsd) * cot))}</span>
+                    <span className="block text-xs font-bold text-gray-500">USD {fmt(Math.abs(g.saldoUsd))}</span>
+                  </span>
+                  <IconoFlecha abierto={abierto} />
+                </button>
+                {abierto && (
+                <Fragment>
+                {g.celular && (
+                  <div className="px-3 md:px-4 py-2 border-b border-gray-200 text-xs font-semibold text-gray-600">
+                    Celular:{' '}
+                    <a href={'tel:' + g.celular.replace(/[^\d+]/g, '')} className="font-bold text-blue-600 hover:underline">
+                      {g.celular}
+                    </a>
                   </div>
-                </div>
+                )}
                 {tieneMovimientos(g) && (
                 <div className="px-3 md:px-4 py-2 border-b border-gray-200 grid grid-cols-2 gap-2 text-xs font-semibold text-gray-600">
                   <span>
@@ -2344,8 +2423,11 @@ function Admin() {
                     </div>
                   ))}
                 </div>
+                </Fragment>
+                )}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
@@ -2393,6 +2475,13 @@ function Admin() {
             </div>
           </div>
 
+          {cobrosFiltrados.length > 0 && (
+            <p className="text-[11px] md:text-xs font-medium text-gray-500">
+              La ganancia incluye USD {fmt(gananciaCobrosUSD)} estimados por cobros a cuenta de revendedores. Se calculan con el margen
+              de los equipos que tienen y se reemplazan por las ventas reales cuando cierran la cuenta.
+            </p>
+          )}
+
           {resumenMensual.length > 0 && (
             <div>
               <h3 className="text-xs md:text-sm font-bold text-gray-500 mb-2 uppercase tracking-wider">Total vendido por mes</h3>
@@ -2410,11 +2499,16 @@ function Admin() {
                     <span className="block text-[11px] md:text-xs font-bold text-gray-500 uppercase tracking-wide">{formatearNombreMes(r.mes)}</span>
                     <span className="block text-base md:text-xl font-black text-gray-900 mt-1 break-words">ARS $ {fmt(Math.round(r.totalArs))}</span>
                     <span className="block text-[11px] font-semibold text-gray-500 mt-0.5">USD {fmt(r.totalUsd)} - {r.unidades} venta(s)</span>
+                    {r.cobrosArs > 0 && (
+                      <span className="block text-[10px] font-semibold text-purple-700 mt-0.5">
+                        Incluye ARS $ {fmt(Math.round(r.cobrosArs))} cobrados a revendedores
+                      </span>
+                    )}
                   </button>
                 ))}
               </div>
               <p className="text-[10px] text-gray-400 mt-2">
-                Pesos a la cotizacion del dia de cada venta (las ventas sin ese dato usan la cotizacion actual). Toca un mes para filtrar el historial.
+                Pesos a la cotizacion del dia de cada venta (las ventas sin ese dato usan la cotizacion actual). Los cobros a cuenta de revendedores cuentan en el mes en que se cobraron. Toca un mes para filtrar el historial.
               </p>
             </div>
           )}
@@ -2485,12 +2579,21 @@ function Admin() {
                     <div key={item.categoria + '-' + item.id} className="p-3 bg-white flex items-center justify-between gap-3 hover:bg-gray-50 transition">
                       <div className="min-w-0">
                         <span className="text-[10px] uppercase font-bold text-gray-400 block mb-0.5">
-                          {item.categoria} - {item.fecha_venta ? new Date(item.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha'}
+                          {item.categoria === 'cobro' ? 'cobro a cuenta' : item.categoria} - {item.fecha_venta ? new Date(item.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha'}
                         </span>
                         <div className="font-semibold text-gray-800 text-sm break-words">
-                          {item.categoria === 'celular' ? item.modelo + ' ' + (item.capacidad || '') : item.tipo + ' - ' + item.modelo}
+                          {item.categoria === 'celular'
+                            ? item.modelo + ' ' + (item.capacidad || '')
+                            : item.categoria === 'cobro'
+                            ? item.revendedor
+                            : item.tipo + ' - ' + item.modelo}
                           <CirculoColor color={item.color} />
                         </div>
+                        {item.categoria === 'cobro' && (
+                          <div className="text-[11px] font-semibold text-gray-500">
+                            Cobrado ARS $ {fmt(Math.round(item.precio_usd * cotizacionDe(item)))} - ganancia estimada
+                          </div>
+                        )}
                       </div>
                       <div className="shrink-0 flex flex-col items-end gap-1">
                         <span
@@ -2501,12 +2604,16 @@ function Admin() {
                         >
                           {ganancia < 0 ? '-' : '+'} $ {fmt(Math.abs(ganancia))}
                         </span>
-                        <button
-                          onClick={() => confirmarAnulacion(item)}
-                          className="text-[11px] font-bold text-gray-400 hover:text-red-500 hover:underline py-1"
-                        >
-                          Anular venta
-                        </button>
+                        {item.categoria === 'cobro' ? (
+                          <span className="text-[11px] font-bold text-purple-700 py-1">Estimado</span>
+                        ) : (
+                          <button
+                            onClick={() => confirmarAnulacion(item)}
+                            className="text-[11px] font-bold text-gray-400 hover:text-red-500 hover:underline py-1"
+                          >
+                            Anular venta
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
