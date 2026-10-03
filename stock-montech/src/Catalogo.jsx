@@ -58,6 +58,48 @@ const claveCelular = (c) =>
 const claveAccesorio = (a) =>
   [normalizar(a.tipo), normalizar(a.modelo), normalizar(a.color), normalizar(a.detalles)].join('|');
 
+// ---------- Precios por tramo de cantidad (accesorios) ----------
+// Cada accesorio puede tener tramos { desde, moneda: 'usd' | 'ars', precio }. Para una cantidad
+// se usa el tramo con el mayor "desde" que no la supere; si no hay ninguno aplicable, el precio
+// de lista. Devuelve el precio por unidad en USD y en pesos.
+const precioPorCantidad = (tramos, cantidad, precioListaUsd, cot) => {
+  let tramo = null;
+  (tramos || []).forEach((t) => {
+    if (t.desde <= cantidad && (!tramo || t.desde > tramo.desde)) tramo = t;
+  });
+  const lista = Number(precioListaUsd) || 0;
+  if (!tramo) return { tramo: null, unitarioUsd: lista, unitarioArs: lista * cot };
+  return tramo.moneda === 'ars'
+    ? { tramo, unitarioUsd: cot ? tramo.precio / cot : 0, unitarioArs: tramo.precio }
+    : { tramo, unitarioUsd: tramo.precio, unitarioArs: tramo.precio * cot };
+};
+
+// Rangos de la escala completa para mostrarla: "1 a 4 u.", "5 a 9 u.", "10 o mas u."
+const describirTramos = (tramos, precioListaUsd, cot) => {
+  const orden = [...tramos].sort((a, b) => a.desde - b.desde);
+  const filas = [];
+  if (orden.length > 0 && orden[0].desde > 1) {
+    const hasta = orden[0].desde - 1;
+    filas.push({ rango: hasta === 1 ? '1 u.' : '1 a ' + hasta + ' u.', ars: Math.round((Number(precioListaUsd) || 0) * cot) });
+  }
+  orden.forEach((t, i) => {
+    const siguiente = orden[i + 1];
+    const rango = siguiente
+      ? siguiente.desde - 1 === t.desde
+        ? t.desde + ' u.'
+        : t.desde + ' a ' + (siguiente.desde - 1) + ' u.'
+      : t.desde + ' o mas u.';
+    filas.push({ rango, ars: Math.round(precioPorCantidad([t], t.desde, 0, cot).unitarioArs) });
+  });
+  return filas;
+};
+
+// Atajos de cantidad: el comienzo de cada tramo cargado o, si no hay, x5 y x10
+const atajosDeCantidad = (tramos, stock) => {
+  const base = tramos.length > 0 ? tramos.map((t) => t.desde).filter((n) => n > 1) : [5, 10];
+  return [...new Set(base)].sort((a, b) => a - b).filter((n) => n <= stock);
+};
+
 function BotonConsultar({ href }) {
   return (
     <a
@@ -182,14 +224,11 @@ const armarFilasConSeparador = (lista, obtenerFamilia, obtenerEtiqueta, obtenerS
 // Se piden solo las columnas publicas: el costo nunca viaja al navegador.
 const ESTADOS_CATALOGO = ['disponible', 'revendedor'];
 
-// Cantidad minima del mismo accesorio para que aplique el descuento mayorista
-const MINIMO_MAYORISTA = 2;
-
 function Catalogo() {
   const [celularesAgrupados, setCelularesAgrupados] = useState([]);
   const [accesoriosAgrupados, setAccesoriosAgrupados] = useState([]);
   const [cotizacion, setCotizacion] = useState(1250);
-  const [descuentoMayorista, setDescuentoMayorista] = useState(0);
+  const [escalas, setEscalas] = useState({}); // precios por cantidad: clave del accesorio -> tramos
   const [cantidades, setCantidades] = useState({}); // cantidad elegida por accesorio
   const [cargando, setCargando] = useState(true);
   const [huboError, setHuboError] = useState(false);
@@ -215,13 +254,17 @@ function Catalogo() {
 
         if (configData) setCotizacion(Number(configData.cotizacion_dolar) || 1250);
 
-        // El descuento mayorista se lee aparte: si no esta disponible, el catalogo funciona sin descuento
-        const { data: descuentoData } = await supabase
-          .from('configuracion')
-          .select('descuento_mayorista')
-          .eq('id', 1)
-          .maybeSingle();
-        if (descuentoData) setDescuentoMayorista(Number(descuentoData.descuento_mayorista) || 0);
+        // Precios por cantidad de los accesorios: si no estan disponibles, se usa el precio de lista
+        const { data: escalasData } = await traerTodo(() =>
+          supabase.from('escalas_precio').select('clave,desde,moneda,precio').order('desde')
+        );
+        if (escalasData) {
+          const mapa = {};
+          escalasData.forEach((r) => {
+            (mapa[r.clave] = mapa[r.clave] || []).push({ desde: r.desde, moneda: r.moneda, precio: Number(r.precio) });
+          });
+          setEscalas(mapa);
+        }
 
         const { data: celularesData, error: errorCelulares } = await traerTodo(() =>
           supabase.from('celulares').select('id,modelo,capacidad,color,bateria,precio_usd,detalles,estado').in('estado', ESTADOS_CATALOGO).order('id')
@@ -311,15 +354,16 @@ function Catalogo() {
     return linkWsp(mensaje);
   };
 
-  // Precio de un accesorio segun la cantidad elegida: desde MINIMO_MAYORISTA unidades
-  // se aplica el descuento mayorista a cada unidad
+  // Precio de un accesorio segun la cantidad elegida: usa los precios por cantidad que cargo
+  // el dueno (por tramo) y, si no hay ninguno aplicable, el precio de lista
   const cotizarAccesorio = (acc) => {
     const clave = claveAccesorio(acc);
+    const tramos = escalas[clave] || [];
     const cantidad = Math.min(acc.cantidad, Math.max(1, cantidades[clave] || 1));
-    const aplica = descuentoMayorista > 0 && cantidad >= MINIMO_MAYORISTA;
-    const factor = aplica ? 1 - descuentoMayorista / 100 : 1;
-    const unitario = Math.round(Number(acc.precio_usd) * factor * cotizacion);
-    return { clave, cantidad, aplica, unitario, total: unitario * cantidad };
+    const precio = precioPorCantidad(tramos, cantidad, acc.precio_usd, cotizacion);
+    const unitario = Math.round(precio.unitarioArs);
+    const lista = Math.round(Number(acc.precio_usd) * cotizacion);
+    return { clave, tramos, cantidad, aplica: Boolean(precio.tramo) && unitario < lista, unitario, total: unitario * cantidad };
   };
 
   const cambiarCantidad = (clave, cantidad) => setCantidades({ ...cantidades, [clave]: cantidad });
@@ -331,7 +375,7 @@ function Catalogo() {
     const mensaje =
       cotizado.cantidad > 1
         ? 'Hola Montech! Vi en tu catálogo ' + producto + '. Quiero ' + cotizado.cantidad + ' unidades a $' + unitario +
-          ' c/u' + (cotizado.aplica ? ' (precio mayorista, ' + descuentoMayorista + '% de descuento)' : '') +
+          ' c/u' + (cotizado.aplica ? ' (precio por cantidad)' : '') +
           ', total $' + cotizado.total.toLocaleString('es-AR') + '. ¿Tenés stock?'
         : 'Hola Montech! Vi en tu catálogo ' + producto + ' a $' + unitario + '. ¿Tenés stock?';
     return linkWsp(mensaje);
@@ -525,11 +569,6 @@ function Catalogo() {
       )}
 
       {/* TABLA ACCESORIOS */}
-      {tabActiva === 'accesorios' && descuentoMayorista > 0 && accesoriosAgrupados.length > 0 && (
-        <p className="mb-2 px-1 text-[11px] md:text-xs font-semibold text-green-700">
-          Precio mayorista: llevando {MINIMO_MAYORISTA} o mas unidades del mismo accesorio tenes {descuentoMayorista}% de descuento.
-        </p>
-      )}
       {tabActiva === 'accesorios' && (
         <div className="shadow-sm border border-gray-300 rounded-lg w-full overflow-hidden">
           <table className="w-full table-fixed border-collapse">
@@ -588,6 +627,13 @@ function Catalogo() {
                       {acc.detalles && (
                         <div className="text-[9px] md:text-[11px] text-gray-500 leading-tight mt-0.5">{acc.detalles}</div>
                       )}
+                      {cotizado.tramos.length > 0 && (
+                        <div className="text-[9px] md:text-[11px] font-semibold text-green-700 leading-tight mt-0.5">
+                          {describirTramos(cotizado.tramos, acc.precio_usd, cotizacion)
+                            .map((f) => f.rango + ': $ ' + f.ars.toLocaleString('es-AR'))
+                            .join(' | ')}
+                        </div>
+                      )}
                       {acc.cantidad > 1 && (
                         <div className="mt-1 inline-flex items-center border border-gray-300 rounded-md overflow-hidden bg-white align-middle">
                           <button
@@ -611,7 +657,7 @@ function Catalogo() {
                           </button>
                         </div>
                       )}
-                      {[5, 10].filter((n) => n <= acc.cantidad).map((n) => (
+                      {atajosDeCantidad(cotizado.tramos, acc.cantidad).map((n) => (
                         <button
                           key={n}
                           type="button"
@@ -636,7 +682,7 @@ function Catalogo() {
                       )}
                       {cotizado.aplica && (
                         <div className="text-[9px] md:text-[11px] font-bold text-green-700 whitespace-nowrap">
-                          -{descuentoMayorista}% mayorista
+                          Precio por cantidad
                         </div>
                       )}
                     </td>
