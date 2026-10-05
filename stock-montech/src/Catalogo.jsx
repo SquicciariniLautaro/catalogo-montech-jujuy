@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from './supabase';
+import FirmaLambda from './FirmaLambda';
 
 // Normaliza texto para comparar: quita caracteres raros, espacios repetidos y pasa a mayusculas
 const normalizar = (v) =>
@@ -449,7 +450,8 @@ function Catalogo() {
   }
 
   return (
-    <div className="relative p-1.5 max-w-4xl mx-auto font-sans bg-white pb-4 min-h-screen flex flex-col">
+    <div className="min-h-screen flex flex-col">
+    <div className="relative p-1.5 w-full max-w-4xl mx-auto font-sans bg-white pb-4 flex-1 flex flex-col">
       {esAdmin && (
         <a
           href="/admin"
@@ -730,34 +732,24 @@ function Catalogo() {
 
         <div className="w-[80%] border-t border-gray-200 mb-3"></div>
 
-        <div className="flex flex-col items-center">
-          <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5">
-            Desarrollado por
-          </span>
-          <div className="flex items-center gap-3">
-            <a
-              href="https://www.instagram.com/lambdasoluciones/"
-              target="_blank"
-              rel="noreferrer"
-              className="font-bold text-[11px] uppercase tracking-wider text-blue-600 hover:text-blue-800 transition"
-            >
-              LAMBDA SOLUCIONES
-            </a>
+        <div className="w-full px-3 flex items-center justify-between gap-3 text-[11px] font-medium text-gray-400">
+          <span>© {new Date().getFullYear()} Montech Jujuy. Todos los derechos reservados.</span>
 
-            {/* Candado discreto: lleva al login, o directo al panel si ya hay sesion iniciada */}
-            <a
-              href="/admin"
-              className="text-gray-300 hover:text-gray-700 transition p-1"
-              title="Acceso Administrativo"
-              aria-label="Acceso Administrativo"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-              </svg>
-            </a>
-          </div>
+          {/* Candado discreto: lleva al login, o directo al panel si ya hay sesion iniciada */}
+          <a
+            href="/admin"
+            className="shrink-0 text-gray-300 hover:text-gray-700 transition p-1"
+            title="Acceso Administrativo"
+            aria-label="Acceso Administrativo"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+          </a>
         </div>
       </div>
+    </div>
+    <FirmaLambda />
     </div>
   );
 }
