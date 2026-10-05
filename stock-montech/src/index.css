@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+@theme {
+  --color-lambda: #ffd60a; /* firma de Lambda Soluciones */
+}
+
 body {
 font-family: 'Poppins', sans-serif;
 background-color: #f3f4f6;

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, Fragment } from 'react';
 import { supabase } from './supabase';
 import toast from 'react-hot-toast';
+import FirmaLambda from './FirmaLambda';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 
 const COLORES = [
@@ -2764,18 +2765,12 @@ function Admin() {
         )}
       </div>
 
-      {/* FOOTER */}
-      <div className="mt-12 text-center flex flex-col items-center">
-        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5">Desarrollado por</span>
-        <a
-          href="https://www.instagram.com/lambdasoluciones/"
-          target="_blank"
-          rel="noreferrer"
-          className="font-bold text-xs uppercase tracking-wide text-blue-600 hover:text-blue-800 transition"
-        >
-          LAMBDA SOLUCIONES
-        </a>
-      </div>
+      {/* FOOTER: ocupa todo el ancho, por fuera del margen de la pagina */}
+      <FirmaLambda
+        className="mt-12 -mx-3 -mb-3 md:-mx-8 md:-mb-8"
+        ancho="max-w-6xl"
+        espacioInferior={carrito.length > 0 && !carritoAbierto}
+      />
 
       {/* MENU DESPLEGABLE DE OPCIONES (posicion fija, no se recorta por el scroll de la lista) */}
       {menu && (
