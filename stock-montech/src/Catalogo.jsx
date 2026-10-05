@@ -35,21 +35,32 @@ const redondear = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
 
 // Agrupa las unidades iguales en una sola fila. El precio NO forma parte de la clave:
 // se muestra el promedio ponderado del lote, igual que en el panel de administracion.
+// El precio sale solo de las unidades que estan en el local: las que tiene un revendedor
+// suman en la cantidad, pero conservan el precio de cuando se entregaron y el panel no las
+// cuenta, asi que promediarlas haria que el catalogo muestre otro precio que el panel.
 const agruparCatalogo = (filas, claveFn) => {
   const grupos = filas.reduce((acc, f) => {
     const k = claveFn(f);
-    if (!acc[k]) acc[k] = { ...f, cantidad: 0, precioTotal: 0, conRevendedor: 0 };
+    if (!acc[k]) acc[k] = { ...f, cantidad: 0, precioLocal: 0, precioRevendedor: 0, conRevendedor: 0 };
     acc[k].cantidad += 1;
-    if (f.estado === 'revendedor') acc[k].conRevendedor += 1;
-    acc[k].precioTotal += Number(f.precio_usd) || 0;
+    if (f.estado === 'revendedor') {
+      acc[k].conRevendedor += 1;
+      acc[k].precioRevendedor += Number(f.precio_usd) || 0;
+    } else {
+      acc[k].precioLocal += Number(f.precio_usd) || 0;
+    }
     return acc;
   }, {});
   // soloRevendedor: la unica unidad del lote la tiene un revendedor (no esta en el local)
-  return Object.values(grupos).map((g) => ({
-    ...g,
-    precio_usd: redondear(g.precioTotal / g.cantidad),
-    soloRevendedor: g.cantidad === 1 && g.conRevendedor === 1,
-  }));
+  return Object.values(grupos).map((g) => {
+    const enLocal = g.cantidad - g.conRevendedor;
+    return {
+      ...g,
+      // Si no queda ninguna en el local, se usa el precio de las que tiene el revendedor
+      precio_usd: redondear(enLocal > 0 ? g.precioLocal / enLocal : g.precioRevendedor / g.conRevendedor),
+      soloRevendedor: g.cantidad === 1 && g.conRevendedor === 1,
+    };
+  });
 };
 
 const claveCelular = (c) =>

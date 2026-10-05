@@ -41,7 +41,7 @@ const VENTAS_POR_PAGINA = 10;
 
 // Colores del grafico por mes: paleta categorica en orden fijo
 const COLORES_GRAFICO = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300'];
-const ALTO_MENU = 290;
+const ALTO_MENU = 335;
 
 // Columnas compartidas por el encabezado y las filas del stock en escritorio
 const COLUMNAS_STOCK = 'md:grid md:grid-cols-[minmax(0,1fr)_17rem_8rem] md:gap-4 md:items-center';
@@ -296,6 +296,67 @@ async function guardarLoteConPromedio(tabla, filaBase, cantidad, claveFn) {
 
   return { error: null, costo, precio, unificadas: mismos.length };
 }
+
+// Cuentas a cobrar: equipos entregados a un revendedor o senados por un cliente. Las dos
+// funcionan igual (carrito, pagos a cuenta, saldo, cierre); cambian el estado de la unidad,
+// la tabla donde se guardan los pagos y los textos. Los equipos senados no se muestran en el
+// catalogo publico; los de revendedor, si.
+const CUENTAS = {
+  revendedor: {
+    estado: 'revendedor',
+    tablaPagos: 'pagos_revendedor',
+    carrito: 'Carrito revendedor',
+    agregado: 'Agregado al carrito de revendedor',
+    etiquetaNombre: 'Nombre del revendedor',
+    faltaNombre: 'Coloque el nombre del revendedor',
+    etiquetaMonto: 'Monto entregado ahora (pesos ARS)',
+    ayudaMonto: '0 si no entrego nada',
+    notaCarrito: 'Los equipos salen del stock disponible y siguen en el catalogo publico. Cuando el saldo llega a cero, pasan solos al historial de ventas.',
+    carritoVacio: 'El carrito esta vacio. Agrega equipos desde Opciones y luego "Al carrito revendedor".',
+    confirmar: 'Confirmar entrega',
+    asignadas: ' unidad(es) entregada(s) a ',
+    unidadesTotales: 'Unidades en la calle',
+    explicacion:
+      'Equipos entregados a consignacion. Siguen apareciendo en el catalogo publico (con una "R" cuando es la unica unidad), pero no en el stock disponible. Cuando un revendedor paga un equipo, tocas "Pagado" y pasa al historial de ventas. Para entregar equipos, usa Opciones y luego "Al carrito revendedor" en el stock.',
+    sinCuentas: 'Todavia no hay revendedores. Agrega uno con el boton de arriba o entregale equipos desde el carrito.',
+    enSuPoder: ' unidad(es) en su poder',
+    sinEquipos: 'Sin equipos en su poder.',
+    desde: 'Entregado el ',
+    devolver: 'Devolvio',
+    tituloDevolucion: 'El revendedor devolvio',
+    preguntaDevolucion: 'Cuantas unidades devolvio?',
+    notaDevolucion: 'Vuelve al stock disponible con su precio de venta original.',
+    cobro: 'cobro a cuenta',
+    cobroCsv: 'Cobro a cuenta (estimado)',
+  },
+  sena: {
+    estado: 'senado',
+    tablaPagos: 'pagos_sena',
+    carrito: 'Carrito de señas',
+    agregado: 'Agregado al carrito de señas',
+    etiquetaNombre: 'Nombre de quien seña',
+    faltaNombre: 'Coloque el nombre de quien seña',
+    etiquetaMonto: 'Monto de la seña (pesos ARS)',
+    ayudaMonto: 'Cuanto dejo de seña',
+    notaCarrito: 'Los equipos salen del stock disponible y del catalogo publico. Cuando el saldo llega a cero, pasan solos al historial de ventas.',
+    carritoVacio: 'El carrito esta vacio. Agrega equipos desde Opciones y luego "Señar".',
+    confirmar: 'Confirmar seña',
+    asignadas: ' unidad(es) señada(s) por ',
+    unidadesTotales: 'Unidades señadas',
+    explicacion:
+      'Equipos reservados con una seña. No aparecen en el stock disponible ni en el catalogo publico. Cuando el cliente paga el resto, tocas "Pagado" (o registras el pago) y pasa al historial de ventas. Si se cae la venta, tocas "Cancelo" y el equipo vuelve al stock. Para señar un equipo, usa Opciones y luego "Señar" en el stock.',
+    sinCuentas: 'No hay equipos señados. Para señar uno, usa Opciones y luego "Señar" en el stock.',
+    enSuPoder: ' unidad(es) señada(s)',
+    sinEquipos: 'Sin equipos señados.',
+    desde: 'Señado el ',
+    devolver: 'Cancelo',
+    tituloDevolucion: 'Se cancelo la seña',
+    preguntaDevolucion: 'Cuantas unidades se cancelan?',
+    notaDevolucion: 'Vuelve al stock disponible y al catalogo publico. Lo que ya entrego queda a su favor hasta que cierres la cuenta.',
+    cobro: 'seña',
+    cobroCsv: 'Seña (estimado)',
+  },
+};
 
 const calcularStats = (arrayStock, cot) => {
   const totalQty = arrayStock.reduce((acc, item) => acc + item.cantidad, 0);
@@ -669,6 +730,7 @@ function Admin() {
   const [stockAccesorios, setStockAccesorios] = useState([]);
   const [ventasGlobales, setVentasGlobales] = useState([]);
   const [enRevendedor, setEnRevendedor] = useState([]); // unidades entregadas a consignacion
+  const [enSena, setEnSena] = useState([]); // unidades senadas por un cliente
   const [escalas, setEscalas] = useState({}); // precios por cantidad: clave del accesorio -> tramos
   const [editorEscala, setEditorEscala] = useState(null); // { lote, filas: [{ desde, moneda, precio }] }
   const [listaRevendedores, setListaRevendedores] = useState([]); // revendedores guardados
@@ -703,9 +765,11 @@ function Admin() {
   const [carrito, setCarrito] = useState([]); // [{ id, tabla, cantidad, precio (ARS por unidad) }]
   const [carritoAbierto, setCarritoAbierto] = useState(false);
   const [carritoNombre, setCarritoNombre] = useState('');
+  const [carritoCuenta, setCarritoCuenta] = useState('revendedor'); // 'revendedor' o 'sena'
   const [carritoEntregado, setCarritoEntregado] = useState('');
   const [pagosRevendedor, setPagosRevendedor] = useState([]); // pagos a cuenta todavia no aplicados
-  const [pagoRevendedor, setPagoRevendedor] = useState(null); // { nombre, monto (ARS) }
+  const [pagosSena, setPagosSena] = useState([]); // lo entregado por las senas, todavia no aplicado
+  const [pagoRevendedor, setPagoRevendedor] = useState(null); // { cuenta, nombre, monto (ARS) }
   const [suma, setSuma] = useState(null); // { item, tabla, cantidad }
   const [borrado, setBorrado] = useState(null); // { item, tabla, cantidad }
   const [resolucion, setResolucion] = useState(null); // { lote, destino, cantidad }
@@ -785,7 +849,7 @@ function Admin() {
     if (mostrarLoader) setCargando(true);
 
     // El orden final (de menor a mayor precio, igual que el catalogo publico) se aplica al agrupar
-    const [config, celDisponibles, accDisponibles, celVendidos, accVendidos, celRevendedor, accRevendedor] = await Promise.all([
+    const [config, celDisponibles, accDisponibles, celVendidos, accVendidos, celRevendedor, accRevendedor, celSena, accSena] = await Promise.all([
       supabase.from('configuracion').select('*').eq('id', 1).single(),
       traerTodo(() => supabase.from('celulares').select('*').eq('estado', 'disponible').order('modelo', { ascending: true }).order('id')),
       traerTodo(() => supabase.from('accesorios').select('*').eq('estado', 'disponible').order('tipo', { ascending: true }).order('id')),
@@ -793,9 +857,11 @@ function Admin() {
       traerTodo(() => supabase.from('accesorios').select('*').eq('estado', 'vendido').order('id')),
       traerTodo(() => supabase.from('celulares').select('*').eq('estado', 'revendedor').order('id')),
       traerTodo(() => supabase.from('accesorios').select('*').eq('estado', 'revendedor').order('id')),
+      traerTodo(() => supabase.from('celulares').select('*').eq('estado', 'senado').order('id')),
+      traerTodo(() => supabase.from('accesorios').select('*').eq('estado', 'senado').order('id')),
     ]);
 
-    const fallo = [config, celDisponibles, accDisponibles, celVendidos, accVendidos, celRevendedor, accRevendedor].find((r) => r.error);
+    const fallo = [config, celDisponibles, accDisponibles, celVendidos, accVendidos, celRevendedor, accRevendedor, celSena, accSena].find((r) => r.error);
     if (fallo) toast.error('Error al cargar datos: ' + fallo.error.message);
 
     if (config.data) setCotizacion(config.data.cotizacion_dolar);
@@ -813,6 +879,10 @@ function Admin() {
       supabase.from('pagos_revendedor').select('*').eq('aplicado', false).order('fecha')
     );
     setPagosRevendedor(pagos.error ? [] : pagos.data);
+
+    // Pagos de las senas (tabla opcional: si falta, se toma como vacia)
+    const pagosDeSenas = await traerTodo(() => supabase.from('pagos_sena').select('*').eq('aplicado', false).order('fecha'));
+    setPagosSena(pagosDeSenas.error ? [] : pagosDeSenas.data);
 
     // Precios por cantidad de los accesorios (tabla opcional: si falta, se vende a precio de lista)
     const esc = await traerTodo(() => supabase.from('escalas_precio').select('*').order('desde'));
@@ -849,6 +919,10 @@ function Admin() {
       ...(celRevendedor.data || []).map((u) => ({ ...u, tabla: 'celulares' })),
       ...(accRevendedor.data || []).map((u) => ({ ...u, tabla: 'accesorios' })),
     ]);
+    setEnSena([
+      ...(celSena.data || []).map((u) => ({ ...u, tabla: 'celulares' })),
+      ...(accSena.data || []).map((u) => ({ ...u, tabla: 'accesorios' })),
+    ]);
 
     if (mostrarLoader) setCargando(false);
   }
@@ -872,7 +946,7 @@ function Admin() {
     ventasFiltradas.forEach((v) => {
       const fecha = v.fecha_venta ? new Date(v.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha';
       const ganancia = (v.precio_usd - v.costo_usd).toFixed(2);
-      const cat = v.categoria === 'celular' ? 'Celular' : v.categoria === 'cobro' ? 'Cobro a cuenta (estimado)' : 'Accesorio';
+      const cat = v.categoria === 'celular' ? 'Celular' : v.categoria === 'cobro' ? CUENTAS[v.cuenta].cobroCsv : 'Accesorio';
       const producto = v.categoria === 'celular' ? v.modelo + ' ' + v.capacidad : v.categoria === 'cobro' ? v.revendedor : v.tipo + ' ' + v.modelo;
       csv += [escaparCsv(cat), escaparCsv(producto), escaparCsv(v.color), escaparCsv(fecha), v.costo_usd, v.precio_usd, ganancia, cotizacionDe(v), Math.round(v.precio_usd * cotizacionDe(v))].join(',') + '\n';
     });
@@ -1120,7 +1194,7 @@ function Admin() {
     cargarDatos(false);
   }
 
-  // ---------- Revendedores (consignacion) ----------
+  // ---------- Revendedores (consignacion) y senas ----------
   const nombreItem = (item, tabla) =>
     (tabla === 'celulares'
       ? item.modelo + ' ' + (item.capacidad || '') + ' - Bateria ' + item.bateria + '%'
@@ -1135,34 +1209,34 @@ function Admin() {
 
   const diasDesde = (fechaISO) => Math.max(0, Math.floor((Date.now() - new Date(fechaISO).getTime()) / 86400000));
 
-  // Agrupa las unidades en consignacion por revendedor y, dentro de cada uno, por lote
-  // (mismo equipo, mismo precio acordado y mismo dia de entrega). Suma los pagos a cuenta
-  // de cada revendedor para calcular el saldo: deuda en USD menos lo entregado en USD.
-  const gruposRevendedor = (() => {
+  // Agrupa las unidades de una cuenta (revendedor o sena) por persona y, dentro de cada una,
+  // por lote (mismo equipo, mismo precio acordado y mismo dia de entrega). Suma los pagos a
+  // cuenta de cada persona para calcular el saldo: deuda en USD menos lo entregado en USD.
+  const armarGrupos = (cuenta, unidades, pagos, lista) => {
     const grupos = {};
     const grupo = (nombre) => {
       const k = normalizar(nombre);
       if (!grupos[k]) {
         grupos[k] = {
-          nombre, unidades: 0, totalUsd: 0, costoTotalUsd: 0, lotes: {}, pagadoUsd: 0, pagadoArs: 0, pagos: 0, aplicadoUsd: 0, aplicadoArs: 0,
+          cuenta, nombre, unidades: 0, totalUsd: 0, costoTotalUsd: 0, lotes: {}, pagadoUsd: 0, pagadoArs: 0, pagos: 0, aplicadoUsd: 0, aplicadoArs: 0,
           celular: '', idLista: null,
         };
       }
       return grupos[k];
     };
-    enRevendedor.forEach((u) => {
+    unidades.forEach((u) => {
       const g = grupo(String(u.revendedor || '').trim() || 'Sin nombre');
       const precio = precioAcordado(u);
       g.unidades += 1;
       g.totalUsd += precio;
       g.costoTotalUsd += Number(u.costo_usd) || 0;
       const kl = [u.tabla, u.tabla === 'celulares' ? claveCelular(u) : claveAccesorio(u), precio, diaEntrega(u)].join('|');
-      if (!g.lotes[kl]) g.lotes[kl] = { ...u, cantidad: 0, ids: [], precioUnidad: precio, precioTotal: 0 };
+      if (!g.lotes[kl]) g.lotes[kl] = { ...u, cuenta, cantidad: 0, ids: [], precioUnidad: precio, precioTotal: 0 };
       g.lotes[kl].cantidad += 1;
       g.lotes[kl].ids.push(u.id);
       g.lotes[kl].precioTotal += precio;
     });
-    pagosRevendedor.forEach((pago) => {
+    pagos.forEach((pago) => {
       const g = grupo(String(pago.revendedor || '').trim() || 'Sin nombre');
       const usd = Number(pago.monto_usd) || 0;
       const ars = Number(pago.monto_ars) || 0;
@@ -1177,7 +1251,7 @@ function Admin() {
       }
     });
     // Los revendedores guardados aparecen aunque no tengan equipos ni pagos
-    listaRevendedores.forEach((r) => {
+    lista.forEach((r) => {
       const g = grupo(r.nombre);
       g.celular = r.celular || '';
       g.idLista = r.id;
@@ -1192,22 +1266,27 @@ function Admin() {
         return { ...g, lotes: Object.values(g.lotes), creditoUsd, creditoArs, margen, saldoUsd: g.totalUsd - creditoUsd };
       })
       .sort((a, b) => comparar(a.nombre, b.nombre));
-  })();
+  };
 
-  // Cobros a cuenta de los revendedores, para sumarlos a los ingresos y a la ganancia de la
+  const gruposRevendedor = armarGrupos('revendedor', enRevendedor, pagosRevendedor, listaRevendedores);
+  // Las senas no usan lista guardada: la cuenta existe mientras haya equipos senados o plata entregada
+  const gruposSena = armarGrupos('sena', enSena, pagosSena, []);
+  const gruposDe = (cuenta) => (cuenta === 'sena' ? gruposSena : gruposRevendedor);
+
+  // Cobros a cuenta de los revendedores y de las senas, para sumarlos a los ingresos y a la ganancia de la
   // pestana Ventas apenas se cobran. Cada cobro se trata como una venta parcial: ingreso = lo
-  // cobrado y ganancia = lo cobrado x margen de los equipos que ese revendedor tiene (estimada).
+  // cobrado y ganancia = lo cobrado x margen de los equipos de esa cuenta (estimada).
   // Lo que ya se aplico a equipos pagados (filas negativas) se descuenta de los cobros mas viejos,
   // porque esos equipos ya figuran como ventas reales: asi no se cuenta dos veces.
-  const cobrosEstimados = (() => {
+  const estimarCobros = (cuenta, pagos) => {
     const porRevendedor = {};
-    pagosRevendedor.forEach((p) => {
+    pagos.forEach((p) => {
       const k = normalizar(String(p.revendedor || '').trim() || 'Sin nombre');
       (porRevendedor[k] = porRevendedor[k] || []).push(p);
     });
     const eventos = [];
     Object.entries(porRevendedor).forEach(([k, filas]) => {
-      const g = gruposRevendedor.find((x) => normalizar(x.nombre) === k);
+      const g = gruposDe(cuenta).find((x) => normalizar(x.nombre) === k);
       const margen = g ? g.margen : 0;
       let aDescontarUsd = filas.reduce((acc, p) => acc + (Number(p.monto_usd) < 0 ? -Number(p.monto_usd) : 0), 0);
       filas
@@ -1224,6 +1303,7 @@ function Admin() {
           eventos.push({
             id: p.id,
             categoria: 'cobro',
+            cuenta,
             revendedor: g ? g.nombre : String(p.revendedor || '').trim(),
             fecha_venta: p.fecha,
             precio_usd: restoUsd,
@@ -1233,23 +1313,29 @@ function Admin() {
         });
     });
     return eventos;
-  })();
+  };
+  const cobrosEstimados = [...estimarCobros('revendedor', pagosRevendedor), ...estimarCobros('sena', pagosSena)];
 
   // Saldo menor a medio centavo de dolar se considera cubierto
   const saldoCubierto = (saldoUsd) => saldoUsd < 0.005;
 
-  const totalEnLaCalleUsd = gruposRevendedor.reduce((acc, g) => acc + g.totalUsd, 0);
-  const totalEntregadoUsd = gruposRevendedor.reduce((acc, g) => acc + Math.max(0, g.creditoUsd), 0);
-  const totalEntregadoArs = gruposRevendedor.reduce((acc, g) => acc + Math.max(0, g.creditoArs), 0);
-  const saldoPendienteUsd = gruposRevendedor.reduce((acc, g) => acc + Math.max(0, g.saldoUsd), 0);
+  // La pestana Senas muestra lo mismo que Revendedores, con las cuentas de senas
+  const cuentaTab = activeTab === 'senas' ? 'sena' : 'revendedor';
+  const textosTab = CUENTAS[cuentaTab];
+  const gruposTab = gruposDe(cuentaTab);
+  const unidadesTab = gruposTab.reduce((acc, g) => acc + g.unidades, 0);
+  const totalEnLaCalleUsd = gruposTab.reduce((acc, g) => acc + g.totalUsd, 0);
+  const totalEntregadoUsd = gruposTab.reduce((acc, g) => acc + Math.max(0, g.creditoUsd), 0);
+  const totalEntregadoArs = gruposTab.reduce((acc, g) => acc + Math.max(0, g.creditoArs), 0);
+  const saldoPendienteUsd = gruposTab.reduce((acc, g) => acc + Math.max(0, g.saldoUsd), 0);
 
-  // Revendedor al que pertenece un lote de la pestana Revendedores
+  // Persona (revendedor o cliente que seno) a la que pertenece un lote
   const grupoDeLote = (lote) => {
     const nombre = String(lote.revendedor || '').trim() || 'Sin nombre';
-    return gruposRevendedor.find((g) => normalizar(g.nombre) === normalizar(nombre)) || null;
+    return gruposDe(lote.cuenta).find((g) => normalizar(g.nombre) === normalizar(nombre)) || null;
   };
 
-  // ---------- Carrito de revendedor ----------
+  // ---------- Carrito (para un revendedor o para una sena) ----------
   const loteDelCarrito = (c) =>
     (c.tabla === 'celulares' ? stockCelulares : stockAccesorios).find((l) => String(l.ids[0]) === c.id);
 
@@ -1265,10 +1351,27 @@ function Admin() {
   const totalCarritoArs = itemsCarrito.reduce((acc, i) => acc + (i.valido ? i.precioArs : 0) * i.cantidad, 0);
   const unidadesCarrito = itemsCarrito.reduce((acc, i) => acc + i.cantidad, 0);
   const entregadoCarritoArs = parseFloat(carritoEntregado) || 0;
-  const grupoCarrito = gruposRevendedor.find((g) => normalizar(g.nombre) === normalizar(carritoNombre));
+  const textosCarrito = CUENTAS[carritoCuenta];
+  const grupoCarrito = gruposDe(carritoCuenta).find((g) => normalizar(g.nombre) === normalizar(carritoNombre));
   const saldoPrevioArs = grupoCarrito ? grupoCarrito.saldoUsd * cot : 0;
 
-  const agregarAlCarrito = (item, tabla) => {
+  const agregarAlCarrito = (item, tabla, cuenta = 'revendedor') => {
+    // El carrito es uno solo: no se mezclan equipos para un revendedor con equipos senados
+    if (carrito.length > 0 && cuenta !== carritoCuenta) {
+      toast.error(
+        (carritoCuenta === 'sena'
+          ? 'El carrito tiene equipos para señar.'
+          : 'El carrito tiene equipos para un revendedor.') + ' Confirmalo o vacialo antes de seguir.',
+        { duration: 6000 }
+      );
+      return;
+    }
+    if (cuenta !== carritoCuenta) {
+      setCarritoCuenta(cuenta);
+      setCarritoNombre('');
+      setCarritoCelular('');
+      setCarritoEntregado('');
+    }
     const id = String(item.ids[0]);
     const existente = carrito.find((c) => c.id === id && c.tabla === tabla);
     if (existente) {
@@ -1280,18 +1383,19 @@ function Admin() {
     } else {
       setCarrito([...carrito, { id, tabla, cantidad: 1, precio: Math.round(item.precio_usd * cot) }]);
     }
-    toast.success('Agregado al carrito de revendedor');
+    toast.success(CUENTAS[cuenta].agregado);
   };
   const cambiarItemCarrito = (item, cambios) =>
     setCarrito(carrito.map((c) => (c.id === item.id && c.tabla === item.tabla ? { ...c, ...cambios } : c)));
   const quitarDelCarrito = (item) => setCarrito(carrito.filter((c) => !(c.id === item.id && c.tabla === item.tabla)));
 
-  // Marca como vendidas todas las unidades de un revendedor (al precio acordado de cada una)
+  // Marca como vendidas todas las unidades de una cuenta (al precio acordado de cada una)
   // y da por aplicados sus pagos a cuenta. Lee la base para no depender de datos viejos.
-  async function cerrarCuentaRevendedor(nombre) {
+  async function cerrarCuenta(cuenta, nombre) {
+    const { estado, tablaPagos } = CUENTAS[cuenta];
     for (const tabla of ['celulares', 'accesorios']) {
       const { data, error } = await traerTodo(() =>
-        supabase.from(tabla).select('id, precio_usd, precio_revendedor').eq('estado', 'revendedor').eq('revendedor', nombre).order('id')
+        supabase.from(tabla).select('id, precio_usd, precio_revendedor').eq('estado', estado).eq('revendedor', nombre).order('id')
       );
       if (error) return { error };
       const porPrecio = {};
@@ -1304,11 +1408,11 @@ function Admin() {
         if (errorVenta) return { error: errorVenta };
       }
     }
-    return supabase.from('pagos_revendedor').update({ aplicado: true }).eq('revendedor', nombre).eq('aplicado', false);
+    return supabase.from(tablaPagos).update({ aplicado: true }).eq('revendedor', nombre).eq('aplicado', false);
   }
 
-  async function registrarPagoRevendedor(nombre, montoArs) {
-    return supabase.from('pagos_revendedor').insert({
+  async function registrarPagoCuenta(cuenta, nombre, montoArs) {
+    return supabase.from(CUENTAS[cuenta].tablaPagos).insert({
       revendedor: nombre,
       monto_ars: redondear(montoArs),
       cotizacion: cot,
@@ -1319,7 +1423,7 @@ function Admin() {
   async function confirmarCarrito() {
     const escrito = carritoNombre.trim();
     if (!escrito) {
-      toast.error('Coloque el nombre del revendedor');
+      toast.error(textosCarrito.faltaNombre);
       return;
     }
     if (itemsCarrito.length === 0) {
@@ -1334,7 +1438,8 @@ function Admin() {
       toast.error('La cotizacion debe ser mayor a cero');
       return;
     }
-    // Si ya existe un revendedor con ese nombre, se usa la misma escritura para no duplicarlo
+    // Si ya existe una cuenta con ese nombre, se usa la misma escritura para no duplicarla
+    const cuenta = carritoCuenta;
     const nombre = grupoCarrito ? grupoCarrito.nombre : escrito;
     const saldoFinalUsd = (grupoCarrito ? grupoCarrito.saldoUsd : 0) + totalCarritoArs / cot - entregadoCarritoArs / cot;
     const fecha = new Date().toISOString();
@@ -1343,29 +1448,35 @@ function Admin() {
       const { error } = await porTandas(item.lote.ids.slice(0, item.cantidad), (tanda) =>
         supabase
           .from(item.tabla)
-          .update({ estado: 'revendedor', revendedor: nombre, precio_revendedor: redondear(item.precioArs / cot), fecha_revendedor: fecha })
+          .update({ estado: CUENTAS[cuenta].estado, revendedor: nombre, precio_revendedor: redondear(item.precioArs / cot), fecha_revendedor: fecha })
           .in('id', tanda)
       );
       if (error) {
-        toast.error('Error al asignar: ' + error.message);
+        // La base todavia no acepta el estado de las senas: falta correr el SQL de esta version
+        toast.error(
+          cuenta === 'sena' && /check|constraint|estado/i.test(error.message)
+            ? 'Para usar las señas hay que actualizar la base de datos (falta correr el SQL).'
+            : 'Error al asignar: ' + error.message,
+          { duration: 6000 }
+        );
         cargarDatos(false);
         return;
       }
     }
 
-    await asegurarEnLista(nombre, carritoCelular);
+    if (cuenta === 'revendedor') await asegurarEnLista(nombre, carritoCelular);
 
     if (entregadoCarritoArs > 0) {
-      const { error } = await registrarPagoRevendedor(nombre, entregadoCarritoArs);
+      const { error } = await registrarPagoCuenta(cuenta, nombre, entregadoCarritoArs);
       if (error) toast.error('Los equipos se asignaron, pero no se pudo guardar el monto entregado: ' + error.message);
     }
 
     if (saldoCubierto(saldoFinalUsd)) {
-      const { error } = await cerrarCuentaRevendedor(nombre);
+      const { error } = await cerrarCuenta(cuenta, nombre);
       if (error) toast.error('No se pudo cerrar la cuenta: ' + error.message);
       else toast.success('Pago completo: los equipos de ' + nombre + ' quedaron como vendidos');
     } else {
-      toast.success(unidadesCarrito + ' unidad(es) entregada(s) a ' + nombre + '. Saldo: ARS $ ' + fmt(Math.round(saldoFinalUsd * cot)));
+      toast.success(unidadesCarrito + CUENTAS[cuenta].asignadas + nombre + '. Saldo: ARS $ ' + fmt(Math.round(saldoFinalUsd * cot)));
     }
     setCarrito([]);
     setCarritoNombre('');
@@ -1375,13 +1486,13 @@ function Admin() {
     cargarDatos(false);
   }
 
-  // ---------- Pagos a cuenta de un revendedor ----------
-  const grupoPago = pagoRevendedor ? gruposRevendedor.find((g) => g.nombre === pagoRevendedor.nombre) : null;
+  // ---------- Pagos a cuenta ----------
+  const grupoPago = pagoRevendedor ? gruposDe(pagoRevendedor.cuenta).find((g) => g.nombre === pagoRevendedor.nombre) : null;
   const montoPagoArs = pagoRevendedor ? parseFloat(pagoRevendedor.monto) || 0 : 0;
   const saldoTrasPagoUsd = grupoPago ? grupoPago.saldoUsd - (cot ? montoPagoArs / cot : 0) : 0;
 
   async function confirmarPagoRevendedor() {
-    const { nombre } = pagoRevendedor;
+    const { cuenta, nombre } = pagoRevendedor;
     if (!(montoPagoArs > 0)) {
       toast.error('Indica el monto que entrego');
       return;
@@ -1392,13 +1503,13 @@ function Admin() {
     }
     const saldoFinal = saldoTrasPagoUsd;
     setPagoRevendedor(null);
-    const { error } = await registrarPagoRevendedor(nombre, montoPagoArs);
+    const { error } = await registrarPagoCuenta(cuenta, nombre, montoPagoArs);
     if (error) {
       toast.error('Error al registrar el pago: ' + error.message);
       return;
     }
     if (saldoCubierto(saldoFinal) && grupoPago.unidades > 0) {
-      const { error: errorCierre } = await cerrarCuentaRevendedor(nombre);
+      const { error: errorCierre } = await cerrarCuenta(cuenta, nombre);
       if (errorCierre) toast.error('El pago se guardo, pero no se pudo cerrar la cuenta: ' + errorCierre.message);
       else toast.success('Saldo cubierto: los equipos de ' + nombre + ' quedaron como vendidos');
     } else {
@@ -1413,13 +1524,13 @@ function Admin() {
       texto:
         g.unidades > 0
           ? 'Sus ' + g.unidades + ' unidad(es) pasan al historial de ventas al precio acordado y los pagos a cuenta se dan por aplicados.'
-          : 'No tiene equipos en su poder. Los pagos a cuenta se dan por aplicados y la cuenta queda en cero.',
+          : 'No tiene equipos a su nombre. Los pagos a cuenta se dan por aplicados y la cuenta queda en cero.',
       botones: [
         {
           etiqueta: 'Cerrar cuenta',
           clase: 'bg-green-600 hover:bg-green-700',
           accion: async () => {
-            const { error } = await cerrarCuentaRevendedor(g.nombre);
+            const { error } = await cerrarCuenta(g.cuenta, g.nombre);
             if (error) toast.error('No se pudo cerrar la cuenta: ' + error.message);
             else toast.success('Cuenta de ' + g.nombre + ' cerrada');
             cargarDatos(false);
@@ -1428,7 +1539,7 @@ function Admin() {
       ],
     });
 
-  // El revendedor devuelve el equipo: vuelve al stock con su precio de venta original
+  // El revendedor devuelve el equipo (o se cancela la sena): vuelve al stock con su precio de venta original
   async function devolverRevendedor(ids, tabla) {
     const { error } = await porTandas(ids, (tanda) =>
       supabase
@@ -1487,7 +1598,7 @@ function Admin() {
 
     // Lo entregado a cuenta que cubre estos equipos se descuenta con una fila negativa
     if (aplicadoUsd > 0.005) {
-      const { error: errorAplicacion } = await supabase.from('pagos_revendedor').insert({
+      const { error: errorAplicacion } = await supabase.from(CUENTAS[lote.cuenta].tablaPagos).insert({
         revendedor: nombre,
         monto_ars: -redondear(aplicadoArs),
         cotizacion: cot,
@@ -1502,7 +1613,7 @@ function Admin() {
     const quedan = grupo ? grupo.unidades - ids.length : 0;
     const saldoNuevoUsd = grupo ? grupo.saldoUsd - (valorUsd - aplicadoUsd) : 0;
     if (quedan === 0 || saldoCubierto(saldoNuevoUsd)) {
-      const { error: errorCierre } = await cerrarCuentaRevendedor(nombre);
+      const { error: errorCierre } = await cerrarCuenta(lote.cuenta, nombre);
       if (errorCierre) toast.error('Se registro el pago, pero no se pudo cerrar la cuenta: ' + errorCierre.message);
       else toast.success('Cuenta de ' + nombre + ' saldada: sus equipos quedaron como vendidos');
     } else {
@@ -1516,8 +1627,9 @@ function Admin() {
   // ---------- Lista de revendedores ----------
   const tieneMovimientos = (g) => g.unidades > 0 || g.pagos > 0 || g.aplicadoArs > 0;
 
+  const claveDesplegable = (g) => g.cuenta + '|' + normalizar(g.nombre);
   const alternarRevendedor = (g) => {
-    const clave = normalizar(g.nombre);
+    const clave = claveDesplegable(g);
     setRevAbiertos({ ...revAbiertos, [clave]: !revAbiertos[clave] });
   };
 
@@ -1987,7 +2099,10 @@ function Admin() {
           <button onClick={() => cambiarTab('revendedores')} className={claseTab('revendedores')}>
             Revendedores{enRevendedor.length > 0 ? ' (' + enRevendedor.length + ')' : ''}
           </button>
-          <button onClick={() => cambiarTab('ventas')} className={claseTab('ventas')}>Ventas</button>
+          <button onClick={() => cambiarTab('senas')} className={claseTab('senas')}>
+            Señas{enSena.length > 0 ? ' (' + enSena.length + ')' : ''}
+          </button>
+          <button onClick={() => cambiarTab('ventas')} className={claseTab('ventas') + ' col-span-2 md:col-span-1'}>Ventas</button>
         </div>
 
         {/* ===================== TAB CELULARES ===================== */}
@@ -2240,13 +2355,13 @@ function Admin() {
           </div>
         )}
 
-        {/* ===================== TAB REVENDEDORES ===================== */}
-        {activeTab === 'revendedores' && (
+        {/* ===================== TAB REVENDEDORES Y TAB SENAS ===================== */}
+        {(activeTab === 'revendedores' || activeTab === 'senas') && (
           <div className="space-y-4 md:space-y-6">
             <div className="bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 grid grid-cols-2 md:grid-cols-4 gap-4">
               <div className="border-l-4 border-gray-400 pl-3 min-w-0">
-                <p className="text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1">Unidades en la calle</p>
-                <p className="font-black text-lg md:text-2xl text-gray-800">{enRevendedor.length}</p>
+                <p className="text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1">{textosTab.unidadesTotales}</p>
+                <p className="font-black text-lg md:text-2xl text-gray-800">{unidadesTab}</p>
               </div>
               <div className="border-l-4 border-blue-500 pl-3 min-w-0">
                 <p className="text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1">Total equipos</p>
@@ -2264,28 +2379,28 @@ function Admin() {
                 <p className="text-[11px] font-semibold text-gray-500">USD {fmt(saldoPendienteUsd)}</p>
               </div>
               <p className="col-span-2 md:col-span-4 text-[11px] text-gray-400">
-                Equipos entregados a consignacion. Siguen apareciendo en el catalogo publico (con una "R" cuando es la unica unidad), pero no en el stock disponible. Cuando un revendedor paga un equipo, tocas "Pagado" y pasa al historial de ventas. Para entregar equipos, usa Opciones y luego "Al carrito revendedor" en el stock.
+                {textosTab.explicacion}
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={abrirAltaRevendedor}
-              className="w-full md:w-auto bg-purple-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold shadow-sm hover:bg-purple-700 transition"
-            >
-              + Agregar revendedor
-            </button>
+            {cuentaTab === 'revendedor' && (
+              <button
+                type="button"
+                onClick={abrirAltaRevendedor}
+                className="w-full md:w-auto bg-purple-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold shadow-sm hover:bg-purple-700 transition"
+              >
+                + Agregar revendedor
+              </button>
+            )}
 
-            {gruposRevendedor.length === 0 && (
+            {gruposTab.length === 0 && (
               <div className="bg-white rounded-2xl shadow-sm border border-gray-200">
-                <p className="text-center p-8 text-gray-500">
-                  Todavia no hay revendedores. Agrega uno con el boton de arriba o entregale equipos desde el carrito.
-                </p>
+                <p className="text-center p-8 text-gray-500">{textosTab.sinCuentas}</p>
               </div>
             )}
 
-            {gruposRevendedor.map((g) => {
-              const abierto = revAbiertos[normalizar(g.nombre)] === true;
+            {gruposTab.map((g) => {
+              const abierto = revAbiertos[claveDesplegable(g)] === true;
               return (
               <div key={g.nombre} className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
                 <button
@@ -2300,7 +2415,7 @@ function Admin() {
                   <span className="min-w-0 flex-1">
                     <span className="block text-lg font-bold text-gray-900 break-words leading-tight">{g.nombre}</span>
                     <span className="block text-xs font-semibold text-gray-500 mt-0.5">
-                      {g.unidades} unidad(es) en su poder
+                      {g.unidades}{textosTab.enSuPoder}
                     </span>
                   </span>
                   <span className="shrink-0 text-right">
@@ -2342,7 +2457,7 @@ function Admin() {
                   {tieneMovimientos(g) && (
                     <button
                       type="button"
-                      onClick={() => setPagoRevendedor({ nombre: g.nombre, monto: '' })}
+                      onClick={() => setPagoRevendedor({ cuenta: g.cuenta, nombre: g.nombre, monto: '' })}
                       className="flex-1 md:flex-none bg-green-600 text-white px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-green-700 transition"
                     >
                       Registrar pago
@@ -2357,22 +2472,26 @@ function Admin() {
                       Cerrar cuenta
                     </button>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => abrirEdicionRevendedor(g)}
-                    className="flex-1 md:flex-none bg-white border border-gray-300 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-gray-50 transition"
-                  >
-                    Editar datos
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => pedirEliminarRevendedor(g)}
-                    className="flex-1 md:flex-none bg-white border border-gray-300 text-red-500 px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-red-50 transition"
-                  >
-                    Eliminar
-                  </button>
+                  {cuentaTab === 'revendedor' && (
+                    <Fragment>
+                      <button
+                        type="button"
+                        onClick={() => abrirEdicionRevendedor(g)}
+                        className="flex-1 md:flex-none bg-white border border-gray-300 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-gray-50 transition"
+                      >
+                        Editar datos
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => pedirEliminarRevendedor(g)}
+                        className="flex-1 md:flex-none bg-white border border-gray-300 text-red-500 px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-red-50 transition"
+                      >
+                        Eliminar
+                      </button>
+                    </Fragment>
+                  )}
                 </div>
-                {g.lotes.length === 0 && <p className="px-3 md:px-4 py-3 text-xs text-gray-500">Sin equipos en su poder.</p>}
+                {g.lotes.length === 0 && <p className="px-3 md:px-4 py-3 text-xs text-gray-500">{textosTab.sinEquipos}</p>}
                 <div className="divide-y divide-gray-100">
                   {g.lotes.map((lote) => (
                     <div key={lote.tabla + '-' + lote.ids[0]} className="p-3 md:px-4 flex flex-col gap-2 md:flex-row md:items-center md:gap-4">
@@ -2395,7 +2514,7 @@ function Admin() {
                         </div>
                         {lote.fecha_revendedor && (
                           <p className="mt-1 text-[11px] font-semibold text-purple-700">
-                            Entregado el {diaEntrega(lote)} (hace {diasDesde(lote.fecha_revendedor)} dia(s))
+                            {textosTab.desde}{diaEntrega(lote)} (hace {diasDesde(lote.fecha_revendedor)} dia(s))
                           </p>
                         )}
                       </div>
@@ -2417,7 +2536,7 @@ function Admin() {
                           onClick={() => confirmarResolucion(lote, 'disponible')}
                           className="flex-1 md:flex-none bg-gray-200 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-gray-300 transition"
                         >
-                          Devolvio
+                          {textosTab.devolver}
                         </button>
                       </div>
                     </div>
@@ -2477,8 +2596,8 @@ function Admin() {
 
           {cobrosFiltrados.length > 0 && (
             <p className="text-[11px] md:text-xs font-medium text-gray-500">
-              La ganancia incluye USD {fmt(gananciaCobrosUSD)} estimados por cobros a cuenta de revendedores. Se calculan con el margen
-              de los equipos que tienen y se reemplazan por las ventas reales cuando cierran la cuenta.
+              La ganancia incluye USD {fmt(gananciaCobrosUSD)} estimados por cobros a cuenta de revendedores y señas. Se calculan con el margen
+              de los equipos de cada cuenta y se reemplazan por las ventas reales cuando se cierra.
             </p>
           )}
 
@@ -2501,14 +2620,14 @@ function Admin() {
                     <span className="block text-[11px] font-semibold text-gray-500 mt-0.5">USD {fmt(r.totalUsd)} - {r.unidades} venta(s)</span>
                     {r.cobrosArs > 0 && (
                       <span className="block text-[10px] font-semibold text-purple-700 mt-0.5">
-                        Incluye ARS $ {fmt(Math.round(r.cobrosArs))} cobrados a revendedores
+                        Incluye ARS $ {fmt(Math.round(r.cobrosArs))} cobrados a cuenta
                       </span>
                     )}
                   </button>
                 ))}
               </div>
               <p className="text-[10px] text-gray-400 mt-2">
-                Pesos a la cotizacion del dia de cada venta (las ventas sin ese dato usan la cotizacion actual). Los cobros a cuenta de revendedores cuentan en el mes en que se cobraron. Toca un mes para filtrar el historial.
+                Pesos a la cotizacion del dia de cada venta (las ventas sin ese dato usan la cotizacion actual). Los cobros a cuenta de revendedores y las señas cuentan en el mes en que se cobraron. Toca un mes para filtrar el historial.
               </p>
             </div>
           )}
@@ -2576,10 +2695,10 @@ function Admin() {
                 {ventasPaginadas.map((item) => {
                   const ganancia = item.precio_usd - item.costo_usd;
                   return (
-                    <div key={item.categoria + '-' + item.id} className="p-3 bg-white flex items-center justify-between gap-3 hover:bg-gray-50 transition">
+                    <div key={item.categoria + '-' + (item.cuenta || '') + '-' + item.id} className="p-3 bg-white flex items-center justify-between gap-3 hover:bg-gray-50 transition">
                       <div className="min-w-0">
                         <span className="text-[10px] uppercase font-bold text-gray-400 block mb-0.5">
-                          {item.categoria === 'cobro' ? 'cobro a cuenta' : item.categoria} - {item.fecha_venta ? new Date(item.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha'}
+                          {item.categoria === 'cobro' ? CUENTAS[item.cuenta].cobro : item.categoria} - {item.fecha_venta ? new Date(item.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha'}
                         </span>
                         <div className="font-semibold text-gray-800 text-sm break-words">
                           {item.categoria === 'celular'
@@ -2724,6 +2843,16 @@ function Admin() {
                 onClick={() => {
                   const { item, tabla } = menu;
                   setMenu(null);
+                  agregarAlCarrito(item, tabla, 'sena');
+                }}
+                className="px-4 py-3 text-sm font-bold text-gray-900 bg-white hover:bg-gray-100 text-left border-b border-gray-50"
+              >
+                Señar
+              </button>
+              <button
+                onClick={() => {
+                  const { item, tabla } = menu;
+                  setMenu(null);
                   confirmarBorrado(item, tabla);
                 }}
                 className="px-4 py-3 text-sm font-bold text-red-500 bg-white hover:bg-red-50 text-left"
@@ -2742,11 +2871,11 @@ function Admin() {
           onClick={() => setCarritoAbierto(true)}
           className="fixed bottom-4 right-4 z-30 bg-gray-900 text-white px-4 py-3 rounded-full shadow-xl text-sm font-bold hover:bg-gray-800 transition"
         >
-          Carrito revendedor ({unidadesCarrito})
+          {textosCarrito.carrito} ({unidadesCarrito})
         </button>
       )}
 
-      {/* MODAL: CARRITO DE REVENDEDOR */}
+      {/* MODAL: CARRITO (REVENDEDOR O SENA) */}
       {carritoAbierto && (
         <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
           <form
@@ -2754,25 +2883,25 @@ function Admin() {
             autoComplete="off"
             className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto"
           >
-            <h2 className="text-xl font-bold text-gray-800">Carrito revendedor</h2>
+            <h2 className="text-xl font-bold text-gray-800">{textosCarrito.carrito}</h2>
 
-            <label className="text-xs font-bold text-gray-600 mt-4 mb-1 block">Nombre del revendedor</label>
+            <label className="text-xs font-bold text-gray-600 mt-4 mb-1 block">{textosCarrito.etiquetaNombre}</label>
             <input
               required
               type="text"
               list="lista-revendedores"
               value={carritoNombre}
               onChange={(e) => setCarritoNombre(e.target.value)}
-              placeholder="Coloque nombre del revendedor"
+              placeholder={textosCarrito.faltaNombre}
               className={claseInputModal}
             />
             <datalist id="lista-revendedores">
-              {gruposRevendedor.map((g) => (
+              {gruposDe(carritoCuenta).map((g) => (
                 <option key={g.nombre} value={g.nombre} />
               ))}
             </datalist>
 
-            {carritoNombre.trim() && !grupoCarrito && (
+            {carritoCuenta === 'revendedor' && carritoNombre.trim() && !grupoCarrito && (
               <Fragment>
                 <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">Celular del revendedor (opcional)</label>
                 <input
@@ -2789,7 +2918,7 @@ function Admin() {
 
             {itemsCarrito.length === 0 ? (
               <p className="mt-4 text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded-lg p-3">
-                El carrito esta vacio. Agrega equipos desde Opciones y luego "Al carrito revendedor".
+                {textosCarrito.carritoVacio}
               </p>
             ) : (
               <ul className="mt-4 space-y-2">
@@ -2831,7 +2960,7 @@ function Admin() {
                       <InputPesos
                         value={i.precio}
                         onChange={(precio) => cambiarItemCarrito(i, { precio })}
-                        aria-label="Precio por unidad para el revendedor, en pesos"
+                        aria-label="Precio acordado por unidad, en pesos"
                         placeholder="Precio por unidad (ARS)"
                         className="flex-1 min-w-0 border border-gray-300 rounded-lg px-2 bg-white text-base md:text-sm font-bold text-gray-800 outline-none focus:border-blue-500"
                       />
@@ -2852,11 +2981,11 @@ function Admin() {
               <p className="text-right text-xs font-bold text-gray-500">{cot ? 'USD ' + fmt(totalCarritoArs / cot) : ''}</p>
             </div>
 
-            <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">Monto entregado ahora (pesos ARS)</label>
+            <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">{textosCarrito.etiquetaMonto}</label>
             <InputPesos
               value={carritoEntregado}
               onChange={setCarritoEntregado}
-              placeholder="0 si no entrego nada"
+              placeholder={textosCarrito.ayudaMonto}
               className={claseInputModal + ' font-bold'}
             />
 
@@ -2872,7 +3001,7 @@ function Admin() {
                 <span>ARS $ {fmt(Math.round(saldoPrevioArs + totalCarritoArs - entregadoCarritoArs))}</span>
               </div>
               <p className="text-[11px] font-medium text-gray-500">
-                Los equipos salen del stock disponible y siguen en el catalogo publico. Cuando el saldo llega a cero, pasan solos al historial de ventas.
+                {textosCarrito.notaCarrito}
               </p>
             </div>
 
@@ -2896,14 +3025,14 @@ function Admin() {
                 disabled={guardando || itemsCarrito.length === 0}
                 className="disabled:opacity-60 w-full bg-purple-600 text-white px-4 py-3 rounded-lg font-bold shadow-sm hover:bg-purple-700 transition"
               >
-                Confirmar entrega
+                {textosCarrito.confirmar}
               </button>
             </div>
           </form>
         </div>
       )}
 
-      {/* MODAL: PAGO A CUENTA DE UN REVENDEDOR */}
+      {/* MODAL: PAGO A CUENTA (REVENDEDOR O SENA) */}
       {pagoRevendedor && grupoPago && (
         <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
           <form
@@ -2961,19 +3090,19 @@ function Admin() {
         </div>
       )}
 
-      {/* MODAL: EL REVENDEDOR PAGA O DEVUELVE */}
+      {/* MODAL: PAGA O DEVUELVE (REVENDEDOR) / PAGA O CANCELA (SENA) */}
       {resolucion && (
         <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto">
             <h2 className="text-xl font-bold text-gray-800">
-              {resolucion.destino === 'vendido' ? 'Marcar como pagado' : 'El revendedor devolvio'}
+              {resolucion.destino === 'vendido' ? 'Marcar como pagado' : CUENTAS[resolucion.lote.cuenta].tituloDevolucion}
             </h2>
             <p className="text-sm font-semibold text-gray-600 mt-1 break-words">
               {resolucion.lote.revendedor}: {nombreItem(resolucion.lote, resolucion.lote.tabla)}
             </p>
 
             <label className="text-xs font-bold text-gray-600 mt-4 mb-1 block">
-              {resolucion.destino === 'vendido' ? 'Cuantas unidades pago?' : 'Cuantas unidades devolvio?'} (tiene {resolucion.lote.cantidad})
+              {resolucion.destino === 'vendido' ? 'Cuantas unidades pago?' : CUENTAS[resolucion.lote.cuenta].preguntaDevolucion} (son {resolucion.lote.cantidad})
             </label>
             <div className="flex items-stretch gap-2">
               <button
@@ -3043,7 +3172,7 @@ function Admin() {
                     <span>ARS $ {fmt(Math.round(valorResolucionUsd * cot))}</span>
                   </div>
                   <p className="text-[11px] font-medium text-gray-500 mt-2">
-                    Vuelve al stock disponible con su precio de venta original.
+                    {CUENTAS[resolucion.lote.cuenta].notaDevolucion}
                   </p>
                 </Fragment>
               )}
