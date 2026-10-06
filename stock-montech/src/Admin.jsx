@@ -147,6 +147,11 @@ const ordenarPorPrecio = (lista, obtenerFamilia, desempate, obtenerMarca = () =>
   });
 };
 
+// Orden del stock de celulares y de accesorios (el mismo que el catalogo publico)
+const ordenarCelulares = (lista) =>
+  ordenarPorPrecio(lista, (c) => familiaDeModelo(c.modelo), compararCelulares, (c) => marcaDeModelo(c.modelo));
+const ordenarAccesorios = (lista) => ordenarPorPrecio(lista, (x) => x.tipo, compararAccesorios);
+
 // La clave de lote NO incluye costo ni precio: ambos se promedian
 const claveCelular = (c) =>
   [
@@ -300,8 +305,8 @@ async function guardarLoteConPromedio(tabla, filaBase, cantidad, claveFn) {
 
 // Cuentas a cobrar: equipos entregados a un revendedor o senados por un cliente. Las dos
 // funcionan igual (carrito, pagos a cuenta, saldo, cierre); cambian el estado de la unidad,
-// la tabla donde se guardan los pagos y los textos. Los equipos senados no se muestran en el
-// catalogo publico; los de revendedor, si.
+// la tabla donde se guardan los pagos y los textos. Ninguna de las dos se muestra en el catalogo
+// publico; en el stock del panel figuran como "Revendedores: N" o "Señas: N" en su lote.
 const CUENTAS = {
   revendedor: {
     estado: 'revendedor',
@@ -312,13 +317,13 @@ const CUENTAS = {
     faltaNombre: 'Coloque el nombre del revendedor',
     etiquetaMonto: 'Monto entregado ahora (pesos ARS)',
     ayudaMonto: '0 si no entrego nada',
-    notaCarrito: 'Los equipos salen del stock disponible y siguen en el catalogo publico. Cuando el saldo llega a cero, pasan solos al historial de ventas.',
+    notaCarrito: 'Los equipos salen del stock disponible y del catalogo publico. Cuando el saldo llega a cero, pasan solos al historial de ventas.',
     carritoVacio: 'El carrito esta vacio. Agrega equipos desde Opciones y luego "Al carrito revendedor".',
     confirmar: 'Confirmar entrega',
     asignadas: ' unidad(es) entregada(s) a ',
     unidadesTotales: 'Unidades en la calle',
     explicacion:
-      'Equipos entregados a consignacion. Siguen apareciendo en el catalogo publico (con una "R" cuando es la unica unidad), pero no en el stock disponible. Cuando un revendedor paga un equipo, tocas "Pagado" y pasa al historial de ventas. Para entregar equipos, usa Opciones y luego "Al carrito revendedor" en el stock.',
+      'Equipos entregados a consignacion. No aparecen en el catalogo publico ni se pueden vender desde el stock: ahi figuran como "Revendedores" en su lote. Cuando un revendedor paga un equipo, tocas "Pagado" y pasa al historial de ventas. Para entregar equipos, usa Opciones y luego "Al carrito revendedor" en el stock.',
     sinCuentas: 'Todavia no hay revendedores. Agrega uno con el boton de arriba o entregale equipos desde el carrito.',
     enSuPoder: ' unidad(es) en su poder',
     sinEquipos: 'Sin equipos en su poder.',
@@ -345,7 +350,7 @@ const CUENTAS = {
     asignadas: ' unidad(es) señada(s) por ',
     unidadesTotales: 'Unidades señadas',
     explicacion:
-      'Equipos reservados con una seña. No aparecen en el stock disponible ni en el catalogo publico. Cuando el cliente paga el resto, tocas "Pagado" (o registras el pago) y pasa al historial de ventas. Si se cae la venta, tocas "Cancelo" y el equipo vuelve al stock. Para señar un equipo, usa Opciones y luego "Señar" en el stock.',
+      'Equipos reservados con una seña. No aparecen en el catalogo publico ni se pueden vender desde el stock: ahi figuran como "Señas" en su lote. Cuando el cliente paga el resto, tocas "Pagado" (o registras el pago) y pasa al historial de ventas. Si se cae la venta, tocas "Cancelo" y el equipo vuelve al stock. Para señar un equipo, usa Opciones y luego "Señar" en el stock.',
     sinCuentas: 'No hay equipos señados. Para señar uno, usa Opciones y luego "Señar" en el stock.',
     enSuPoder: ' unidad(es) señada(s)',
     sinEquipos: 'Sin equipos señados.',
@@ -589,19 +594,44 @@ const agruparFamilias = (lista, obtenerNombre) => {
     const nombre = String(obtenerNombre(item) || 'Sin nombre').trim();
     const clave = normalizar(nombre);
     const ultima = familias[familias.length - 1];
-    if (ultima && ultima.clave === clave) {
-      ultima.items.push(item);
-      ultima.unidades += item.cantidad;
-    } else {
-      familias.push({ clave, nombre, items: [item], unidades: item.cantidad });
-    }
+    const familia =
+      ultima && ultima.clave === clave
+        ? ultima
+        : familias[familias.push({ clave, nombre, items: [], unidades: 0, conRevendedores: 0, senadas: 0 }) - 1];
+    familia.items.push(item);
+    familia.unidades += item.cantidad;
+    familia.conRevendedores += item.fuera ? item.fuera.revendedor : 0;
+    familia.senadas += item.fuera ? item.fuera.sena : 0;
   });
   return familias;
 };
 
+// Cuantas unidades de un lote (o de una familia) no estan en el local: las tienen los
+// revendedores o estan senadas. Texto oscuro sobre fondo claro para que se lea en cualquier navegador.
+function UnidadesFuera({ revendedores, senas, className = '' }) {
+  if (!revendedores && !senas) return null;
+  const clase = 'px-1.5 py-0.5 rounded border text-[10px] font-bold whitespace-nowrap ';
+  return (
+    <span className={'flex flex-wrap items-center gap-1 ' + className}>
+      {revendedores > 0 && (
+        <span className={clase + 'border-purple-200 bg-purple-50 text-purple-700'} title="Unidades de este lote que tienen los revendedores">
+          Revendedores: {revendedores}
+        </span>
+      )}
+      {senas > 0 && (
+        <span className={clase + 'border-amber-200 bg-amber-50 text-amber-700'} title="Unidades de este lote que estan señadas">
+          Señas: {senas}
+        </span>
+      )}
+    </span>
+  );
+}
+
 // Encabezado de una familia del stock: se toca para abrir o cerrar sus lotes
 function EncabezadoFamilia({ familia, abierta, cot, onAlternar }) {
-  const precioMinimo = Math.min(...familia.items.map((i) => Number(i.precio_usd) || 0));
+  // El "desde" sale solo de los lotes que tienen unidades en el local
+  const conStock = familia.items.filter((i) => i.cantidad > 0);
+  const precioMinimo = conStock.length > 0 ? Math.min(...conStock.map((i) => Number(i.precio_usd) || 0)) : 0;
   return (
     <button
       type="button"
@@ -610,8 +640,14 @@ function EncabezadoFamilia({ familia, abierta, cot, onAlternar }) {
       className="w-full flex items-center gap-2 px-3 md:px-4 py-2.5 bg-gray-100 hover:bg-gray-200 text-left transition"
     >
       <span className="min-w-0 flex-1 truncate font-black text-gray-800 text-sm uppercase tracking-wide">{familia.nombre}</span>
-      <span className="shrink-0 text-[11px] font-semibold text-gray-500">
-        {familia.unidades} u. - desde $ {fmt(Math.round(precioMinimo * cot))}
+      {/* En celulares, lo que esta fuera del local va debajo del resumen; en escritorio, al lado */}
+      <span className="shrink-0 flex flex-col items-end gap-1 sm:flex-row-reverse sm:items-center sm:gap-2">
+        <span className="text-[11px] font-semibold text-gray-500">
+          {conStock.length > 0
+            ? familia.unidades + ' u. - desde $ ' + fmt(Math.round(precioMinimo * cot))
+            : '0 u. para vender'}
+        </span>
+        <UnidadesFuera revendedores={familia.conRevendedores} senas={familia.senadas} className="justify-end" />
       </span>
       <IconoFlecha abierto={abierta} />
     </button>
@@ -622,6 +658,12 @@ function EncabezadoFamilia({ familia, abierta, cot, onAlternar }) {
 // precios y las acciones; en escritorio es una fila de tres columnas siempre visible.
 function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
   const [abierto, setAbierto] = useState(false);
+  // Lote sin unidades en el local: todas las tienen los revendedores o estan senadas
+  const sinStock = item.cantidad === 0;
+  const claseCantidad =
+    'shrink-0 px-2 py-0.5 rounded text-xs font-bold shadow-sm ' +
+    (sinStock ? 'bg-gray-200 text-gray-700 border border-gray-300' : 'bg-blue-600 text-white');
+  const fuera = item.fuera || { revendedor: 0, sena: 0 };
   return (
     <div className="hover:bg-gray-50 transition">
       <button
@@ -630,7 +672,7 @@ function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
         aria-expanded={abierto}
         className="md:hidden w-full flex items-center gap-2 px-3 py-2.5 text-left"
       >
-        <span className="shrink-0 bg-blue-600 text-white px-2 py-0.5 rounded text-xs font-bold shadow-sm">{item.cantidad} u.</span>
+        <span className={claseCantidad}>{item.cantidad} u.</span>
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1.5">
             <span className="truncate font-bold text-gray-900 text-sm">{titulo}</span>
@@ -639,6 +681,7 @@ function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
           <span className="block truncate text-[11px] font-medium text-gray-500">
             {[item.color, ...subtitulo].filter(Boolean).join(' - ')}
           </span>
+          <UnidadesFuera revendedores={fuera.revendedor} senas={fuera.sena} className="mt-1" />
         </span>
         <span className="shrink-0 text-right">
           <span className="block text-sm font-bold text-gray-800">$ {fmt(Math.round(item.precio_usd * cot))}</span>
@@ -650,7 +693,7 @@ function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
       <div className={(abierto ? 'flex' : 'hidden') + ' flex-col gap-3 px-3 pb-3 md:px-4 md:py-3 ' + COLUMNAS_STOCK}>
         <div className="hidden md:block min-w-0">
           <div className="flex items-start gap-2">
-            <span className="shrink-0 bg-blue-600 text-white px-2 py-0.5 rounded text-xs font-bold shadow-sm" title="Unidades en stock">
+            <span className={claseCantidad} title="Unidades en el local, disponibles para vender">
               {item.cantidad} u.
             </span>
             <span className="min-w-0 break-words font-bold text-gray-900 text-sm leading-tight">{titulo}</span>
@@ -666,6 +709,7 @@ function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
               <span key={dato} className="break-words min-w-0">{dato}</span>
             ))}
           </div>
+          <UnidadesFuera revendedores={fuera.revendedor} senas={fuera.sena} className="mt-1.5" />
         </div>
         <div className="grid grid-cols-3 gap-2 bg-gray-50 md:bg-transparent rounded-lg p-2 md:p-0">
           <DatoStock etiqueta="Costo USD" valor={'$ ' + fmt(item.costo_usd)} clase="text-red-500" />
@@ -681,13 +725,17 @@ function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
           )}
         </div>
         <div className="md:text-right">
-          <button
-            onClick={onOpciones}
-            className="w-full md:w-auto bg-gray-200 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg font-bold hover:bg-gray-300 transition text-xs shadow-sm"
-          >
-            Opciones
-            <IconoChevron />
-          </button>
+          {sinStock ? (
+            <span className="block text-[11px] font-bold text-gray-500 leading-tight">Sin unidades en el local</span>
+          ) : (
+            <button
+              onClick={onOpciones}
+              className="w-full md:w-auto bg-gray-200 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg font-bold hover:bg-gray-300 transition text-xs shadow-sm"
+            >
+              Opciones
+              <IconoChevron />
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -866,8 +914,8 @@ function Admin() {
     if (fallo) toast.error('Error al cargar datos: ' + fallo.error.message);
 
     if (config.data) setCotizacion(config.data.cotizacion_dolar);
-    if (celDisponibles.data) setStockCelulares(agruparStock(celDisponibles.data, claveCelular, (l) => ordenarPorPrecio(l, (c) => familiaDeModelo(c.modelo), compararCelulares, (c) => marcaDeModelo(c.modelo))));
-    if (accDisponibles.data) setStockAccesorios(agruparStock(accDisponibles.data, claveAccesorio, (l) => ordenarPorPrecio(l, (x) => x.tipo, compararAccesorios)));
+    if (celDisponibles.data) setStockCelulares(agruparStock(celDisponibles.data, claveCelular, ordenarCelulares));
+    if (accDisponibles.data) setStockAccesorios(agruparStock(accDisponibles.data, claveAccesorio, ordenarAccesorios));
 
     const ventasUnificadas = [
       ...(celVendidos.data || []).map((v) => ({ ...v, categoria: 'celular' })),
@@ -1954,8 +2002,58 @@ function Admin() {
       return palabras.every((p) => texto.includes(p));
     });
   };
-  const celularesVisibles = filtrarStock(stockCelulares, ['modelo', 'capacidad', 'color', 'detalles']);
-  const accesoriosVisibles = filtrarStock(stockAccesorios, ['tipo', 'modelo', 'color', 'detalles']);
+
+  // Suma a cada lote cuantas de sus unidades tienen los revendedores o estan senadas, y agrega
+  // (con 0 unidades) los lotes que ya no tienen ninguna en el local. Asi el stock muestra que
+  // esos equipos existen aunque no se puedan vender directamente.
+  const conUnidadesFuera = (stock, tabla, claveFn, ordenar) => {
+    const fuera = {};
+    const contar = (unidades, campo) =>
+      unidades.forEach((u) => {
+        if (u.tabla !== tabla) return;
+        const k = claveFn(u);
+        if (!fuera[k]) fuera[k] = { muestra: u, revendedor: 0, sena: 0, costoTotal: 0, precioTotal: 0 };
+        fuera[k][campo] += 1;
+        fuera[k].costoTotal += Number(u.costo_usd) || 0;
+        fuera[k].precioTotal += Number(u.precio_usd) || 0;
+      });
+    contar(enRevendedor, 'revendedor');
+    contar(enSena, 'sena');
+
+    const enLocal = new Set();
+    const lotes = stock.map((lote) => {
+      const k = claveFn(lote);
+      enLocal.add(k);
+      return fuera[k] ? { ...lote, fuera: { revendedor: fuera[k].revendedor, sena: fuera[k].sena } } : lote;
+    });
+    const sinUnidades = Object.entries(fuera)
+      .filter(([k]) => !enLocal.has(k))
+      .map(([k, f]) => {
+        const total = f.revendedor + f.sena;
+        return {
+          ...f.muestra,
+          claveLote: k,
+          cantidad: 0,
+          ids: [],
+          promediado: false,
+          costo_usd: redondear(f.costoTotal / total),
+          precio_usd: redondear(f.precioTotal / total),
+          fuera: { revendedor: f.revendedor, sena: f.sena },
+        };
+      });
+    return sinUnidades.length > 0 ? ordenar([...lotes, ...sinUnidades]) : lotes;
+  };
+  // Los lotes sin unidades no tienen ids: se identifican por la clave del lote
+  const idDeFila = (lote) => (lote.cantidad === 0 ? 'sin-unidades-' + lote.claveLote : lote.ids[0]);
+
+  const celularesVisibles = filtrarStock(
+    conUnidadesFuera(stockCelulares, 'celulares', claveCelular, ordenarCelulares),
+    ['modelo', 'capacidad', 'color', 'detalles']
+  );
+  const accesoriosVisibles = filtrarStock(
+    conUnidadesFuera(stockAccesorios, 'accesorios', claveAccesorio, ordenarAccesorios),
+    ['tipo', 'modelo', 'color', 'detalles']
+  );
 
   // Ventas reales mas cobros a cuenta de revendedores (estimados), del mas nuevo al mas viejo
   const movimientosGlobales = [...ventasGlobales, ...cobrosEstimados].sort(
@@ -2172,7 +2270,7 @@ function Admin() {
                         onAlternar={() => alternarFamilia('celulares', familia.clave, abierta)}
                       />
                       {abierta && familia.items.map((celu) =>
-                  editandoCelularId === celu.ids[0] ? (
+                  celu.cantidad > 0 && editandoCelularId === celu.ids[0] ? (
                     <div key={celu.ids[0]} className="p-3 md:p-4 bg-blue-50/40">
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                         <Campo etiqueta="Modelo">
@@ -2211,7 +2309,7 @@ function Admin() {
                     </div>
                   ) : (
                     <FilaStock
-                      key={celu.ids[0]}
+                      key={idDeFila(celu)}
                       item={celu}
                       titulo={celu.modelo + ' ' + (celu.capacidad || '')}
                       subtitulo={['Bateria ' + celu.bateria + '%', celu.detalles].filter(Boolean)}
@@ -2226,7 +2324,7 @@ function Admin() {
               </div>
               {celularesVisibles.length === 0 && (
                 <p className="text-center p-8 text-gray-500">
-                  {stockCelulares.length === 0 ? 'No hay celulares en stock.' : 'Ningun equipo coincide con la busqueda.'}
+                  {busquedaStock.trim() ? 'Ningun equipo coincide con la busqueda.' : 'No hay celulares en stock.'}
                 </p>
               )}
             </div>
@@ -2298,7 +2396,7 @@ function Admin() {
                         onAlternar={() => alternarFamilia('accesorios', familia.clave, abierta)}
                       />
                       {abierta && familia.items.map((acc) =>
-                  editandoAccesorioId === acc.ids[0] ? (
+                  acc.cantidad > 0 && editandoAccesorioId === acc.ids[0] ? (
                     <div key={acc.ids[0]} className="p-3 md:p-4 bg-blue-50/40">
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                         <Campo etiqueta="Tipo">
@@ -2334,7 +2432,7 @@ function Admin() {
                     </div>
                   ) : (
                     <FilaStock
-                      key={acc.ids[0]}
+                      key={idDeFila(acc)}
                       item={acc}
                       titulo={acc.tipo + ' - ' + acc.modelo}
                       subtitulo={[acc.detalles, (escalas[claveAccesorio(acc)] || []).length > 0 ? 'Con precios por cantidad' : ''].filter(Boolean)}
@@ -2349,7 +2447,7 @@ function Admin() {
               </div>
               {accesoriosVisibles.length === 0 && (
                 <p className="text-center p-8 text-gray-500">
-                  {stockAccesorios.length === 0 ? 'No hay accesorios en stock.' : 'Ningun accesorio coincide con la busqueda.'}
+                  {busquedaStock.trim() ? 'Ningun accesorio coincide con la busqueda.' : 'No hay accesorios en stock.'}
                 </p>
               )}
             </div>
@@ -2709,13 +2807,17 @@ function Admin() {
                             : item.tipo + ' - ' + item.modelo}
                           <CirculoColor color={item.color} />
                         </div>
-                        {item.categoria === 'cobro' && (
-                          <div className="text-[11px] font-semibold text-gray-500">
-                            Cobrado ARS $ {fmt(Math.round(item.precio_usd * cotizacionDe(item)))} - ganancia estimada
-                          </div>
-                        )}
+                        {/* Total de la venta, en pesos a la cotizacion de ese dia y en dolares */}
+                        <div className="text-[11px] font-semibold text-gray-500">
+                          {item.categoria === 'cobro' ? 'Cobrado' : 'Venta'}:{' '}
+                          <span className="font-bold text-gray-800">ARS $ {fmt(Math.round(item.precio_usd * cotizacionDe(item)))}</span>
+                          {' - USD '}
+                          {fmt(item.precio_usd)}
+                          {item.categoria === 'cobro' ? ' - ganancia estimada' : ''}
+                        </div>
                       </div>
                       <div className="shrink-0 flex flex-col items-end gap-1">
+                        <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wide leading-none">Ganancia USD</span>
                         <span
                           className={
                             'font-bold text-sm px-2 py-1 rounded whitespace-nowrap ' +
