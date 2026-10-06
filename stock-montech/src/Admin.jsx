@@ -991,13 +991,13 @@ function Admin() {
   const escaparCsv = (valor) => '"' + String(valor === null || valor === undefined ? '' : valor).replace(/"/g, '""') + '"';
 
   const exportarCSV = () => {
-    let csv = '﻿Categoria,Producto,Color,Fecha Venta,Costo USD,Venta USD,Ganancia USD,Cotizacion,Venta ARS\n';
-    ventasFiltradas.forEach((v) => {
+    let csv = '﻿Categoria,Producto,Color,Fecha Venta,Cantidad,Costo USD,Venta USD,Ganancia USD,Cotizacion,Venta ARS\n';
+    ventasAgrupadas.forEach((v) => {
       const fecha = v.fecha_venta ? new Date(v.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha';
       const ganancia = (v.precio_usd - v.costo_usd).toFixed(2);
       const cat = v.categoria === 'celular' ? 'Celular' : v.categoria === 'cobro' ? CUENTAS[v.cuenta].cobroCsv : 'Accesorio';
       const producto = v.categoria === 'celular' ? v.modelo + ' ' + v.capacidad : v.categoria === 'cobro' ? v.revendedor : v.tipo + ' ' + v.modelo;
-      csv += [escaparCsv(cat), escaparCsv(producto), escaparCsv(v.color), escaparCsv(fecha), v.costo_usd, v.precio_usd, ganancia, cotizacionDe(v), Math.round(v.precio_usd * cotizacionDe(v))].join(',') + '\n';
+      csv += [escaparCsv(cat), escaparCsv(producto), escaparCsv(v.color), escaparCsv(fecha), v.cantidad, redondear(v.costo_usd), redondear(v.precio_usd), ganancia, cotizacionDe(v), Math.round(v.precio_usd * cotizacionDe(v))].join(',') + '\n';
     });
 
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -1224,22 +1224,33 @@ function Admin() {
     cargarDatos(false);
   }
 
-  // Anular una venta cargada por error: la unidad vuelve al stock
-  const confirmarAnulacion = (item) =>
+  // Anular una venta cargada por error: las unidades vuelven al stock. Si la venta fue de
+  // varias unidades iguales, se puede anular toda o una sola.
+  const confirmarAnulacion = (item) => {
+    const cantidad = item.ids.length;
     setDialogo({
-      titulo: 'Anular esta venta?',
-      texto: 'La unidad vuelve al stock disponible.',
-      botones: [{ etiqueta: 'Anular venta', clase: 'bg-red-600 hover:bg-red-700', accion: () => anularVenta(item) }],
+      titulo: cantidad > 1 ? 'Anular esta venta de ' + cantidad + ' unidades?' : 'Anular esta venta?',
+      texto: cantidad > 1 ? 'Las unidades que anules vuelven al stock disponible.' : 'La unidad vuelve al stock disponible.',
+      botones:
+        cantidad > 1
+          ? [
+              { etiqueta: 'Anular las ' + cantidad + ' unidades', clase: 'bg-red-600 hover:bg-red-700', accion: () => anularVenta(item, item.ids) },
+              { etiqueta: 'Anular solo 1 unidad', clase: 'bg-gray-700 hover:bg-gray-800', accion: () => anularVenta(item, item.ids.slice(0, 1)) },
+            ]
+          : [{ etiqueta: 'Anular venta', clase: 'bg-red-600 hover:bg-red-700', accion: () => anularVenta(item, item.ids) }],
     });
+  };
 
-  async function anularVenta(item) {
+  async function anularVenta(item, ids) {
     const tabla = item.categoria === 'celular' ? 'celulares' : 'accesorios';
-    const { error } = await supabase.from(tabla).update({ estado: 'disponible', fecha_venta: null }).eq('id', item.id);
+    const { error } = await porTandas(ids, (tanda) =>
+      supabase.from(tabla).update({ estado: 'disponible', fecha_venta: null }).in('id', tanda)
+    );
     if (error) {
       toast.error('Error al anular la venta: ' + error.message);
       return;
     }
-    toast.success('Venta anulada, la unidad volvio al stock');
+    toast.success(ids.length > 1 ? 'Venta anulada, las ' + ids.length + ' unidades volvieron al stock' : 'Venta anulada, la unidad volvio al stock');
     cargarDatos(false);
   }
 
@@ -2077,10 +2088,41 @@ function Admin() {
   const gananciaVentasUSD = ventasFiltradas.reduce((acc, item) => acc + (item.precio_usd - item.costo_usd), 0);
   const gananciaVentasARS = ventasFiltradas.reduce((acc, item) => acc + (item.precio_usd - item.costo_usd) * cotizacionDe(item), 0);
 
+  // En el historial, las unidades iguales que salieron en la misma venta (mismo momento, mismo
+  // precio) van en un solo renglon: "20 x Funda". precio_usd y costo_usd pasan a ser los totales
+  // del renglon. Los resumenes de arriba siguen contando unidad por unidad.
+  const ventasAgrupadas = (() => {
+    const grupos = new Map();
+    ventasFiltradas.forEach((v) => {
+      const precio = Number(v.precio_usd) || 0;
+      const costo = Number(v.costo_usd) || 0;
+      const clave =
+        v.categoria === 'cobro' || !v.fecha_venta
+          ? [v.categoria, v.cuenta || '', v.id].join('|')
+          : [
+              v.categoria,
+              v.categoria === 'celular' ? claveCelular(v) : claveAccesorio(v),
+              v.fecha_venta,
+              precio,
+              Number(v.cotizacion_venta) || 0,
+            ].join('|');
+      const grupo = grupos.get(clave);
+      if (grupo) {
+        grupo.cantidad += 1;
+        grupo.ids.push(v.id);
+        grupo.precio_usd += precio;
+        grupo.costo_usd += costo;
+      } else {
+        grupos.set(clave, { ...v, claveGrupo: clave, cantidad: 1, ids: [v.id], precioUnidadUsd: precio, precio_usd: precio, costo_usd: costo });
+      }
+    });
+    return [...grupos.values()];
+  })();
+
   const ventasPorPagina = esEscritorio ? VENTAS_POR_PAGINA : 5;
-  const totalPaginas = Math.ceil(ventasFiltradas.length / ventasPorPagina);
+  const totalPaginas = Math.ceil(ventasAgrupadas.length / ventasPorPagina);
   const pagina = Math.min(paginaActual, Math.max(1, totalPaginas));
-  const ventasPaginadas = ventasFiltradas.slice((pagina - 1) * ventasPorPagina, pagina * ventasPorPagina);
+  const ventasPaginadas = ventasAgrupadas.slice((pagina - 1) * ventasPorPagina, pagina * ventasPorPagina);
 
   // Total vendido por mes (ultimos 12 meses con ventas), en pesos a la cotizacion de cada
   // venta (las que no tienen ese dato usan la actual).
@@ -2794,12 +2836,17 @@ function Admin() {
                 {ventasPaginadas.map((item) => {
                   const ganancia = item.precio_usd - item.costo_usd;
                   return (
-                    <div key={item.categoria + '-' + (item.cuenta || '') + '-' + item.id} className="p-3 bg-white flex items-center justify-between gap-3 hover:bg-gray-50 transition">
+                    <div key={item.claveGrupo} className="p-3 bg-white flex items-center justify-between gap-3 hover:bg-gray-50 transition">
                       <div className="min-w-0">
                         <span className="text-[10px] uppercase font-bold text-gray-400 block mb-0.5">
                           {item.categoria === 'cobro' ? CUENTAS[item.cuenta].cobro : item.categoria} - {item.fecha_venta ? new Date(item.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha'}
                         </span>
                         <div className="font-semibold text-gray-800 text-sm break-words">
+                          {item.cantidad > 1 && (
+                            <span className="mr-1.5 px-1.5 py-0.5 rounded border border-gray-300 bg-gray-100 text-gray-900 text-xs font-black whitespace-nowrap">
+                              {item.cantidad} x
+                            </span>
+                          )}
                           {item.categoria === 'celular'
                             ? item.modelo + ' ' + (item.capacidad || '')
                             : item.categoria === 'cobro'
@@ -2813,6 +2860,7 @@ function Admin() {
                           <span className="font-bold text-gray-800">ARS $ {fmt(Math.round(item.precio_usd * cotizacionDe(item)))}</span>
                           {' - USD '}
                           {fmt(item.precio_usd)}
+                          {item.cantidad > 1 ? ' (USD ' + fmt(item.precioUnidadUsd) + ' c/u)' : ''}
                           {item.categoria === 'cobro' ? ' - ganancia estimada' : ''}
                         </div>
                       </div>
