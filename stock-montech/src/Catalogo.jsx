@@ -36,32 +36,15 @@ const redondear = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
 
 // Agrupa las unidades iguales en una sola fila. El precio NO forma parte de la clave:
 // se muestra el promedio ponderado del lote, igual que en el panel de administracion.
-// El precio sale solo de las unidades que estan en el local: las que tiene un revendedor
-// suman en la cantidad, pero conservan el precio de cuando se entregaron y el panel no las
-// cuenta, asi que promediarlas haria que el catalogo muestre otro precio que el panel.
 const agruparCatalogo = (filas, claveFn) => {
   const grupos = filas.reduce((acc, f) => {
     const k = claveFn(f);
-    if (!acc[k]) acc[k] = { ...f, cantidad: 0, precioLocal: 0, precioRevendedor: 0, conRevendedor: 0 };
+    if (!acc[k]) acc[k] = { ...f, cantidad: 0, precioTotal: 0 };
     acc[k].cantidad += 1;
-    if (f.estado === 'revendedor') {
-      acc[k].conRevendedor += 1;
-      acc[k].precioRevendedor += Number(f.precio_usd) || 0;
-    } else {
-      acc[k].precioLocal += Number(f.precio_usd) || 0;
-    }
+    acc[k].precioTotal += Number(f.precio_usd) || 0;
     return acc;
   }, {});
-  // soloRevendedor: la unica unidad del lote la tiene un revendedor (no esta en el local)
-  return Object.values(grupos).map((g) => {
-    const enLocal = g.cantidad - g.conRevendedor;
-    return {
-      ...g,
-      // Si no queda ninguna en el local, se usa el precio de las que tiene el revendedor
-      precio_usd: redondear(enLocal > 0 ? g.precioLocal / enLocal : g.precioRevendedor / g.conRevendedor),
-      soloRevendedor: g.cantidad === 1 && g.conRevendedor === 1,
-    };
-  });
+  return Object.values(grupos).map((g) => ({ ...g, precio_usd: redondear(g.precioTotal / g.cantidad) }));
 };
 
 const claveCelular = (c) =>
@@ -232,9 +215,9 @@ const armarFilasConSeparador = (lista, obtenerFamilia, obtenerEtiqueta, obtenerS
   return filas;
 };
 
-// El catalogo muestra lo disponible y tambien lo que esta en manos de revendedores.
-// Se piden solo las columnas publicas: el costo nunca viaja al navegador.
-const ESTADOS_CATALOGO = ['disponible', 'revendedor'];
+// El catalogo muestra solo lo que esta en el local para vender: lo entregado a revendedores
+// y lo senado no aparece. Se piden solo las columnas publicas: el costo nunca viaja al navegador.
+const ESTADO_CATALOGO = 'disponible';
 
 function Catalogo() {
   const [celularesAgrupados, setCelularesAgrupados] = useState([]);
@@ -279,7 +262,7 @@ function Catalogo() {
         }
 
         const { data: celularesData, error: errorCelulares } = await traerTodo(() =>
-          supabase.from('celulares').select('id,modelo,capacidad,color,bateria,precio_usd,detalles,estado').in('estado', ESTADOS_CATALOGO).order('id')
+          supabase.from('celulares').select('id,modelo,capacidad,color,bateria,precio_usd,detalles').eq('estado', ESTADO_CATALOGO).order('id')
         );
 
         if (celularesData) {
@@ -287,7 +270,7 @@ function Catalogo() {
         }
 
         const { data: accesoriosData, error: errorAccesorios } = await traerTodo(() =>
-          supabase.from('accesorios').select('id,tipo,modelo,color,precio_usd,detalles,estado').in('estado', ESTADOS_CATALOGO).order('id')
+          supabase.from('accesorios').select('id,tipo,modelo,color,precio_usd,detalles').eq('estado', ESTADO_CATALOGO).order('id')
         );
         if (errorCelulares || errorAccesorios) setHuboError(true);
 
@@ -557,9 +540,6 @@ function Catalogo() {
                         <span className="font-medium text-gray-500 text-[10px] md:text-xs ml-1">{celu.capacidad}</span>
                         {renderizarCirculoColor(celu.color)}
                       </div>
-                      {celu.soloRevendedor && (
-                        <div className="text-[10px] font-bold text-orange-500 leading-tight mt-0.5" title="Unica unidad, en manos de un revendedor">R</div>
-                      )}
                       {celu.detalles && (
                         <div className="text-[9px] md:text-[11px] text-gray-500 leading-tight mt-0.5">{celu.detalles}</div>
                       )}
@@ -634,9 +614,6 @@ function Catalogo() {
                         <span className="font-medium text-gray-500 text-[10px] md:text-xs ml-1">{acc.modelo}</span>
                         {renderizarCirculoColor(acc.color)}
                       </div>
-                      {acc.soloRevendedor && (
-                        <div className="text-[10px] font-bold text-orange-500 leading-tight mt-0.5" title="Unica unidad, en manos de un revendedor">R</div>
-                      )}
                       {acc.detalles && (
                         <div className="text-[9px] md:text-[11px] text-gray-500 leading-tight mt-0.5">{acc.detalles}</div>
                       )}
