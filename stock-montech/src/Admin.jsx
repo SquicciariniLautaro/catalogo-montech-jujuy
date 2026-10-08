@@ -725,20 +725,26 @@ function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
           )}
         </div>
         <div className="md:text-right">
-          {sinStock ? (
-            <span className="block text-[11px] font-bold text-gray-500 leading-tight">Sin unidades en el local</span>
-          ) : (
-            <button
-              onClick={onOpciones}
-              className="w-full md:w-auto bg-gray-200 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg font-bold hover:bg-gray-300 transition text-xs shadow-sm"
-            >
-              Opciones
-              <IconoChevron />
-            </button>
-          )}
+          {sinStock && <span className="block mb-1 text-[10px] font-bold text-gray-500 leading-tight">Sin unidades en el local</span>}
+          <button
+            onClick={onOpciones}
+            className="w-full md:w-auto bg-gray-200 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg font-bold hover:bg-gray-300 transition text-xs shadow-sm"
+          >
+            Opciones
+            <IconoChevron />
+          </button>
         </div>
       </div>
     </div>
+  );
+}
+
+// Aviso al editar un lote que no tiene unidades en el local
+function AvisoEdicionFuera() {
+  return (
+    <p className="mb-2 text-[11px] font-semibold text-purple-700">
+      Estas unidades las tienen revendedores o estan señadas. Se corrigen sus datos; lo que deben por ellas no cambia.
+    </p>
   );
 }
 
@@ -832,16 +838,28 @@ function Admin() {
   // ese dato usan la cotizacion actual.
   const cotizacionDe = (v) => Number(v.cotizacion_venta) || cot;
 
+  // Parte del precio de una venta que se cobro con un equipo recibido en permuta (0 si no hubo)
+  const permutaDe = (v) => Number(v.permuta_usd) || 0;
+  // Lo que entro en plata por una venta: el precio menos el equipo recibido en permuta
+  const cobradoDe = (v) => (Number(v.precio_usd) || 0) - permutaDe(v);
+
   // Marca unidades como vendidas y guarda la cotizacion del dia, para que el historial en
-  // pesos no cambie cuando se mueve el dolar. Si la base todavia no tiene la columna
-  // cotizacion_venta, registra la venta igual sin ese dato.
+  // pesos no cambie cuando se mueve el dolar. En celulares guarda tambien el valor del equipo
+  // recibido en permuta (vacio si fue una venta comun). Las dos columnas son opcionales: si la
+  // base todavia no las tiene, registra la venta igual sin ese dato y avisa cuales faltaron.
   async function marcarVendido(tabla, ids, cambios, fecha = new Date().toISOString()) {
-    const base = { estado: 'vendido', fecha_venta: fecha, ...cambios };
-    const resultado = await porTandas(ids, (tanda) => supabase.from(tabla).update({ ...base, cotizacion_venta: cot }).in('id', tanda));
-    if (resultado.error && String(resultado.error.message).includes('cotizacion_venta')) {
-      return porTandas(ids, (tanda) => supabase.from(tabla).update(base).in('id', tanda));
+    const datos = { estado: 'vendido', fecha_venta: fecha, cotizacion_venta: cot, ...cambios };
+    if (tabla === 'celulares' && datos.permuta_usd === undefined) datos.permuta_usd = null;
+    const omitidas = [];
+    for (;;) {
+      const resultado = await porTandas(ids, (tanda) => supabase.from(tabla).update(datos).in('id', tanda));
+      const falta =
+        resultado.error &&
+        ['cotizacion_venta', 'permuta_usd'].find((c) => c in datos && String(resultado.error.message).includes(c));
+      if (!falta) return { ...resultado, omitidas };
+      delete datos[falta];
+      omitidas.push(falta);
     }
-    return resultado;
   }
 
   // Evita que un doble toque dispare dos veces la misma operacion (por ejemplo, duplicar un ingreso)
@@ -991,13 +1009,13 @@ function Admin() {
   const escaparCsv = (valor) => '"' + String(valor === null || valor === undefined ? '' : valor).replace(/"/g, '""') + '"';
 
   const exportarCSV = () => {
-    let csv = '﻿Categoria,Producto,Color,Fecha Venta,Cantidad,Costo USD,Venta USD,Ganancia USD,Cotizacion,Venta ARS\n';
+    let csv = '﻿Categoria,Producto,Color,Fecha Venta,Cantidad,Costo USD,Venta USD,Recibido en permuta USD,Cobrado USD,Ganancia USD,Cotizacion,Cobrado ARS\n';
     ventasAgrupadas.forEach((v) => {
       const fecha = v.fecha_venta ? new Date(v.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha';
       const ganancia = (v.precio_usd - v.costo_usd).toFixed(2);
       const cat = v.categoria === 'celular' ? 'Celular' : v.categoria === 'cobro' ? CUENTAS[v.cuenta].cobroCsv : 'Accesorio';
       const producto = v.categoria === 'celular' ? v.modelo + ' ' + v.capacidad : v.categoria === 'cobro' ? v.revendedor : v.tipo + ' ' + v.modelo;
-      csv += [escaparCsv(cat), escaparCsv(producto), escaparCsv(v.color), escaparCsv(fecha), v.cantidad, redondear(v.costo_usd), redondear(v.precio_usd), ganancia, cotizacionDe(v), Math.round(v.precio_usd * cotizacionDe(v))].join(',') + '\n';
+      csv += [escaparCsv(cat), escaparCsv(producto), escaparCsv(v.color), escaparCsv(fecha), v.cantidad, redondear(v.costo_usd), redondear(v.precio_usd), redondear(permutaDe(v)), redondear(cobradoDe(v)), ganancia, cotizacionDe(v), Math.round(cobradoDe(v) * cotizacionDe(v))].join(',') + '\n';
     });
 
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -1091,10 +1109,20 @@ function Admin() {
     }
 
     if (lotePermuta) {
-      // El equipo entregado sale del stock como una venta al precio del lote
-      const { error: errorEntrega } = await marcarVendido('celulares', [lotePermuta.ids[0]], { precio_usd: lotePermuta.precio_usd });
+      // El equipo entregado sale del stock como una venta al precio del lote. Parte de ese precio
+      // se cobro con el equipo recibido (su valor de toma): en Ventas solo cuenta como plata
+      // cobrada la diferencia, y el equipo recibido suma cuando se venda.
+      const { error: errorEntrega, omitidas } = await marcarVendido('celulares', [lotePermuta.ids[0]], {
+        precio_usd: lotePermuta.precio_usd,
+        permuta_usd: costoUsd,
+      });
       if (errorEntrega) toast.error('El equipo recibido se cargo, pero no se pudo registrar la entrega: ' + errorEntrega.message);
-      else toast.success('Permuta registrada: el equipo recibido entro al stock y el entregado quedo como vendido');
+      else if (omitidas.includes('permuta_usd')) {
+        toast.error(
+          'Permuta registrada, pero en Ventas va a figurar por el precio completo: falta actualizar la base de datos (correr el SQL).',
+          { duration: 8000 }
+        );
+      } else toast.success('Permuta registrada: el equipo recibido entro al stock y el entregado quedo como vendido');
     } else {
       toast.success('Permuta registrada: el equipo recibido entro al stock');
     }
@@ -1106,7 +1134,7 @@ function Admin() {
   // ---------- Menu de opciones ----------
   const abrirMenu = (e, item, tabla) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    const key = tabla + '-' + item.ids[0];
+    const key = tabla + '-' + idDeFila(item);
     if (menu && menu.key === key) {
       setMenu(null);
       return;
@@ -1899,8 +1927,9 @@ function Admin() {
 
   // ---------- Edicion ----------
   const iniciarEdicionCelular = (celular) => {
-    setEditandoCelularId(celular.ids[0]);
-    setFormEdicionCelular({ ...celular, cantidadAEditar: celular.cantidad });
+    const ids = idsEditables(celular);
+    setEditandoCelularId(idDeFila(celular));
+    setFormEdicionCelular({ ...celular, ids, cantidadAEditar: ids.length });
   };
   const handleChangeEdicionCelular = (e) => setFormEdicionCelular({ ...formEdicionCelular, [e.target.name]: e.target.value });
 
@@ -1952,8 +1981,9 @@ function Admin() {
   }
 
   const iniciarEdicionAccesorio = (acc) => {
-    setEditandoAccesorioId(acc.ids[0]);
-    setFormEdicionAccesorio({ ...acc, cantidadAEditar: acc.cantidad });
+    const ids = idsEditables(acc);
+    setEditandoAccesorioId(idDeFila(acc));
+    setFormEdicionAccesorio({ ...acc, ids, cantidadAEditar: ids.length });
   };
   const handleChangeEdicionAccesorio = (e) => setFormEdicionAccesorio({ ...formEdicionAccesorio, [e.target.name]: e.target.value });
 
@@ -2023,7 +2053,8 @@ function Admin() {
       unidades.forEach((u) => {
         if (u.tabla !== tabla) return;
         const k = claveFn(u);
-        if (!fuera[k]) fuera[k] = { muestra: u, revendedor: 0, sena: 0, costoTotal: 0, precioTotal: 0 };
+        if (!fuera[k]) fuera[k] = { muestra: u, ids: [], revendedor: 0, sena: 0, costoTotal: 0, precioTotal: 0 };
+        fuera[k].ids.push(u.id);
         fuera[k][campo] += 1;
         fuera[k].costoTotal += Number(u.costo_usd) || 0;
         fuera[k].precioTotal += Number(u.precio_usd) || 0;
@@ -2046,6 +2077,7 @@ function Admin() {
           claveLote: k,
           cantidad: 0,
           ids: [],
+          idsFuera: f.ids,
           promediado: false,
           costo_usd: redondear(f.costoTotal / total),
           precio_usd: redondear(f.precioTotal / total),
@@ -2054,8 +2086,22 @@ function Admin() {
       });
     return sinUnidades.length > 0 ? ordenar([...lotes, ...sinUnidades]) : lotes;
   };
-  // Los lotes sin unidades no tienen ids: se identifican por la clave del lote
+  // Los lotes sin unidades en el local no tienen ids propios: se identifican por la clave del lote
   const idDeFila = (lote) => (lote.cantidad === 0 ? 'sin-unidades-' + lote.claveLote : lote.ids[0]);
+  // Unidades sobre las que actua "Editar": las del local o, si no queda ninguna, las que estan afuera
+  const idsEditables = (lote) => (lote.cantidad === 0 ? lote.idsFuera : lote.ids);
+
+  // Abre la pestana Revendedores o Senas mostrando a quienes tienen unidades de ese lote
+  const verQuienLoTiene = (lote, tabla, cuenta) => {
+    const claveFn = tabla === 'celulares' ? claveCelular : claveAccesorio;
+    const clave = claveFn(lote);
+    const abiertos = { ...revAbiertos };
+    gruposDe(cuenta).forEach((g) => {
+      if (g.lotes.some((l) => l.tabla === tabla && claveFn(l) === clave)) abiertos[claveDesplegable(g)] = true;
+    });
+    setRevAbiertos(abiertos);
+    cambiarTab(cuenta === 'sena' ? 'senas' : 'revendedores');
+  };
 
   const celularesVisibles = filtrarStock(
     conUnidadesFuera(stockCelulares, 'celulares', claveCelular, ordenarCelulares),
@@ -2105,6 +2151,7 @@ function Admin() {
               v.fecha_venta,
               precio,
               Number(v.cotizacion_venta) || 0,
+              permutaDe(v),
             ].join('|');
       const grupo = grupos.get(clave);
       if (grupo) {
@@ -2112,8 +2159,18 @@ function Admin() {
         grupo.ids.push(v.id);
         grupo.precio_usd += precio;
         grupo.costo_usd += costo;
+        grupo.permuta_usd += permutaDe(v);
       } else {
-        grupos.set(clave, { ...v, claveGrupo: clave, cantidad: 1, ids: [v.id], precioUnidadUsd: precio, precio_usd: precio, costo_usd: costo });
+        grupos.set(clave, {
+          ...v,
+          claveGrupo: clave,
+          cantidad: 1,
+          ids: [v.id],
+          precioUnidadUsd: precio,
+          precio_usd: precio,
+          costo_usd: costo,
+          permuta_usd: permutaDe(v),
+        });
       }
     });
     return [...grupos.values()];
@@ -2125,11 +2182,12 @@ function Admin() {
   const ventasPaginadas = ventasAgrupadas.slice((pagina - 1) * ventasPorPagina, pagina * ventasPorPagina);
 
   // Total vendido por mes (ultimos 12 meses con ventas), en pesos a la cotizacion de cada
-  // venta (las que no tienen ese dato usan la actual).
+  // venta (las que no tienen ese dato usan la actual). En las permutas cuenta lo cobrado en
+  // plata: el equipo recibido suma recien cuando se vende, asi no se cuenta dos veces.
   const resumenMensual = mesesDisponibles.slice(0, 12).map((mes) => {
     const ventasMes = movimientosGlobales.filter((v) => obtenerMesAnio(v.fecha_venta) === mes);
-    const totalUsd = ventasMes.reduce((acc, v) => acc + (Number(v.precio_usd) || 0), 0);
-    const totalArs = ventasMes.reduce((acc, v) => acc + (Number(v.precio_usd) || 0) * cotizacionDe(v), 0);
+    const totalUsd = ventasMes.reduce((acc, v) => acc + cobradoDe(v), 0);
+    const totalArs = ventasMes.reduce((acc, v) => acc + cobradoDe(v) * cotizacionDe(v), 0);
     const cobrosArs = ventasMes
       .filter((v) => v.categoria === 'cobro')
       .reduce((acc, v) => acc + (Number(v.precio_usd) || 0) * cotizacionDe(v), 0);
@@ -2312,8 +2370,9 @@ function Admin() {
                         onAlternar={() => alternarFamilia('celulares', familia.clave, abierta)}
                       />
                       {abierta && familia.items.map((celu) =>
-                  celu.cantidad > 0 && editandoCelularId === celu.ids[0] ? (
-                    <div key={celu.ids[0]} className="p-3 md:p-4 bg-blue-50/40">
+                  editandoCelularId === idDeFila(celu) ? (
+                    <div key={idDeFila(celu)} className="p-3 md:p-4 bg-blue-50/40">
+                      {celu.cantidad === 0 && <AvisoEdicionFuera />}
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                         <Campo etiqueta="Modelo">
                           <input className={claseInputEdicion} name="modelo" value={formEdicionCelular.modelo || ''} onChange={handleChangeEdicionCelular} />
@@ -2342,7 +2401,7 @@ function Admin() {
                         />
                       </div>
                       <AccionesEdicion
-                        cantidad={celu.cantidad}
+                        cantidad={idsEditables(celu).length}
                         valor={formEdicionCelular.cantidadAEditar}
                         onChange={handleChangeEdicionCelular}
                         onGuardar={conBloqueo(guardarEdicionCelular)}
@@ -2438,8 +2497,9 @@ function Admin() {
                         onAlternar={() => alternarFamilia('accesorios', familia.clave, abierta)}
                       />
                       {abierta && familia.items.map((acc) =>
-                  acc.cantidad > 0 && editandoAccesorioId === acc.ids[0] ? (
-                    <div key={acc.ids[0]} className="p-3 md:p-4 bg-blue-50/40">
+                  editandoAccesorioId === idDeFila(acc) ? (
+                    <div key={idDeFila(acc)} className="p-3 md:p-4 bg-blue-50/40">
+                      {acc.cantidad === 0 && <AvisoEdicionFuera />}
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                         <Campo etiqueta="Tipo">
                           <input className={claseInputEdicion} name="tipo" value={formEdicionAccesorio.tipo || ''} onChange={handleChangeEdicionAccesorio} />
@@ -2465,7 +2525,7 @@ function Admin() {
                         />
                       </div>
                       <AccionesEdicion
-                        cantidad={acc.cantidad}
+                        cantidad={idsEditables(acc).length}
                         valor={formEdicionAccesorio.cantidadAEditar}
                         onChange={handleChangeEdicionAccesorio}
                         onGuardar={conBloqueo(guardarEdicionAccesorio)}
@@ -2854,15 +2914,22 @@ function Admin() {
                             : item.tipo + ' - ' + item.modelo}
                           <CirculoColor color={item.color} />
                         </div>
-                        {/* Total de la venta, en pesos a la cotizacion de ese dia y en dolares */}
+                        {/* Total de la venta, en pesos a la cotizacion de ese dia y en dolares.
+                            En una permuta se muestra lo cobrado en plata y, aparte, el equipo recibido. */}
                         <div className="text-[11px] font-semibold text-gray-500">
-                          {item.categoria === 'cobro' ? 'Cobrado' : 'Venta'}:{' '}
-                          <span className="font-bold text-gray-800">ARS $ {fmt(Math.round(item.precio_usd * cotizacionDe(item)))}</span>
+                          {item.categoria === 'cobro' || permutaDe(item) > 0 ? 'Cobrado' : 'Venta'}:{' '}
+                          <span className="font-bold text-gray-800">ARS $ {fmt(Math.round(cobradoDe(item) * cotizacionDe(item)))}</span>
                           {' - USD '}
-                          {fmt(item.precio_usd)}
+                          {fmt(cobradoDe(item))}
                           {item.cantidad > 1 ? ' (USD ' + fmt(item.precioUnidadUsd) + ' c/u)' : ''}
                           {item.categoria === 'cobro' ? ' - ganancia estimada' : ''}
                         </div>
+                        {permutaDe(item) > 0 && (
+                          <div className="text-[11px] font-semibold text-purple-700">
+                            Permuta: mas un equipo tomado en ARS $ {fmt(Math.round(permutaDe(item) * cotizacionDe(item)))}. Precio total ARS ${' '}
+                            {fmt(Math.round(item.precio_usd * cotizacionDe(item)))}
+                          </div>
+                        )}
                       </div>
                       <div className="shrink-0 flex flex-col items-end gap-1">
                         <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wide leading-none">Ganancia USD</span>
@@ -2927,9 +2994,63 @@ function Admin() {
         <Fragment>
           <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} />
           <div
-            className="fixed z-50 w-40 bg-white rounded-xl shadow-xl border border-gray-100 overflow-hidden"
+            className={'fixed z-50 bg-white rounded-xl shadow-xl border border-gray-100 overflow-hidden ' + (menu.item.cantidad === 0 ? 'w-52' : 'w-40')}
             style={{ top: menu.top, right: menu.right }}
           >
+            {menu.item.cantidad === 0 ? (
+              /* Lote sin unidades en el local: se puede reponer, corregir sus datos o ir a quien lo tiene.
+                 Vender y borrar actuan sobre unidades del local, asi que aca no aparecen. */
+              <div className="flex flex-col">
+                <button
+                  onClick={() => {
+                    const { item, tabla } = menu;
+                    setMenu(null);
+                    setSuma({ item, tabla, cantidad: 1 });
+                  }}
+                  className="px-4 py-3 text-sm font-bold text-gray-900 bg-white hover:bg-gray-100 text-left border-b border-gray-50"
+                >
+                  Sumar stock
+                </button>
+                <button
+                  onClick={() => {
+                    const { item, tabla } = menu;
+                    setMenu(null);
+                    if (tabla === 'celulares') iniciarEdicionCelular(item);
+                    else iniciarEdicionAccesorio(item);
+                  }}
+                  className="px-4 py-3 text-sm font-bold text-gray-900 bg-white hover:bg-gray-100 text-left border-b border-gray-50"
+                >
+                  Editar
+                </button>
+                {menu.item.fuera.revendedor > 0 && (
+                  <button
+                    onClick={() => {
+                      const { item, tabla } = menu;
+                      setMenu(null);
+                      verQuienLoTiene(item, tabla, 'revendedor');
+                    }}
+                    className="px-4 py-3 text-sm font-bold text-purple-700 bg-white hover:bg-purple-50 text-left border-b border-gray-50"
+                  >
+                    Ver en Revendedores ({menu.item.fuera.revendedor})
+                  </button>
+                )}
+                {menu.item.fuera.sena > 0 && (
+                  <button
+                    onClick={() => {
+                      const { item, tabla } = menu;
+                      setMenu(null);
+                      verQuienLoTiene(item, tabla, 'sena');
+                    }}
+                    className="px-4 py-3 text-sm font-bold text-amber-700 bg-white hover:bg-amber-50 text-left border-b border-gray-50"
+                  >
+                    Ver en Señas ({menu.item.fuera.sena})
+                  </button>
+                )}
+                <p className="px-4 py-2.5 text-[11px] font-medium text-gray-500 leading-snug bg-gray-50">
+                  Para vender o borrar estas unidades, primero marcalas como devueltas (o cancela la seña): vuelven al stock con todas las opciones.
+                </p>
+              </div>
+            ) : (
             <div className="flex flex-col">
               <button
                 onClick={() => {
@@ -3005,6 +3126,7 @@ function Admin() {
                 Borrar
               </button>
             </div>
+            )}
           </div>
         </Fragment>
       )}
@@ -3979,7 +4101,10 @@ function Admin() {
                       <span>Diferencia a cobrar</span>
                       <span>ARS $ {fmt(Math.round(lotePermuta.precio_usd * cot) - (Number(formPermuta.precio_ars) || 0))}</span>
                     </div>
-                    <p className="mt-2 font-medium text-gray-500">Al guardar, una unidad de este equipo queda como vendida.</p>
+                    <p className="mt-2 font-medium text-gray-500">
+                      Al guardar, una unidad de este equipo queda como vendida. En Ventas cuenta como cobrada solo la diferencia; el
+                      equipo que recibis suma cuando lo vendas.
+                    </p>
                   </div>
                 )}
               </div>
