@@ -368,12 +368,15 @@ const CUENTAS = {
   },
 };
 
-const calcularStats = (arrayStock, cot) => {
+// El costo se pasa a pesos con la cotizacion de costo y la venta con la de venta: la ganancia
+// es la diferencia en pesos, y en dolares se expresa a la cotizacion de venta.
+const calcularStats = (arrayStock, cot, cotCosto) => {
   const totalQty = arrayStock.reduce((acc, item) => acc + item.cantidad, 0);
   const totalCosto = arrayStock.reduce((acc, item) => acc + item.costoTotal, 0);
   const totalVenta = arrayStock.reduce((acc, item) => acc + item.precioTotal, 0);
-  const gananciaUsd = totalVenta - totalCosto;
-  return { totalQty, totalCosto, totalVenta, gananciaUsd, gananciaArs: gananciaUsd * cot };
+  const costoArs = totalCosto * cotCosto;
+  const gananciaArs = totalVenta * cot - costoArs;
+  return { totalQty, totalCosto, totalVenta, costoArs, gananciaUsd: cot ? gananciaArs / cot : totalVenta - totalCosto, gananciaArs };
 };
 
 const obtenerMesAnio = (fechaISO) => {
@@ -573,7 +576,10 @@ function ResumenStock({ etiqueta, stats }) {
       </div>
       <div className="border-l-4 border-red-400 pl-3 min-w-0">
         <p className={claseTitulo}>Costo Invertido</p>
-        <p className={claseValor + ' text-gray-800'}>$ {fmt(stats.totalCosto)}</p>
+        <p className={claseValor + ' text-gray-800'}>
+          $ {fmt(stats.totalCosto)}
+          <span className="text-[10px] text-gray-500 block font-semibold mt-0.5">ARS $ {fmt(Math.round(stats.costoArs))}</span>
+        </p>
       </div>
       <div className="border-l-4 border-blue-500 pl-3 min-w-0">
         <p className={claseTitulo}>Valor de Venta</p>
@@ -591,11 +597,12 @@ function ResumenStock({ etiqueta, stats }) {
 }
 
 // Dato con etiqueta dentro de una fila de stock
-function DatoStock({ etiqueta, valor, clase }) {
+function DatoStock({ etiqueta, valor, clase, detalle }) {
   return (
     <div className="min-w-0">
       <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wide">{etiqueta}</span>
       <span className={'block text-sm font-bold break-words ' + clase}>{valor}</span>
+      {detalle && <span className="block text-[10px] font-semibold text-gray-500 break-words">{detalle}</span>}
     </div>
   );
 }
@@ -712,7 +719,7 @@ function EncabezadoFamilia({ familia, abierta, cot, onAlternar }) {
 
 // Fila de stock. En celulares es un renglon compacto que se abre al tocarlo para ver los
 // precios y las acciones; en escritorio es una fila de tres columnas siempre visible.
-function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
+function FilaStock({ item, titulo, subtitulo, cot, cotCosto, onOpciones }) {
   const [abierto, setAbierto] = useState(false);
   // Lote sin unidades en el local: todas las tienen los revendedores o estan senadas
   const sinStock = item.cantidad === 0;
@@ -768,7 +775,12 @@ function FilaStock({ item, titulo, subtitulo, cot, onOpciones }) {
           <UnidadesFuera revendedores={fuera.revendedor} senas={fuera.sena} className="mt-1.5" />
         </div>
         <div className="grid grid-cols-3 gap-2 bg-gray-50 md:bg-transparent rounded-lg p-2 md:p-0">
-          <DatoStock etiqueta="Costo USD" valor={'$ ' + fmt(item.costo_usd)} clase="text-red-500" />
+          <DatoStock
+            etiqueta="Costo USD"
+            valor={'$ ' + fmt(item.costo_usd)}
+            clase="text-red-500"
+            detalle={'ARS $ ' + fmt(Math.round(item.costo_usd * cotCosto))}
+          />
           <DatoStock etiqueta="Venta USD" valor={'$ ' + fmt(item.precio_usd)} clase="text-green-600" />
           <DatoStock etiqueta="Venta ARS" valor={'$ ' + fmt(Math.round(item.precio_usd * cot))} clase="text-gray-800" />
           {item.promediado && (
@@ -835,6 +847,7 @@ function AccionesEdicion({ cantidad, valor, onChange, onGuardar, onCancelar }) {
 
 function Admin() {
   const [cotizacion, setCotizacion] = useState(1250);
+  const [cotizacionCosto, setCotizacionCosto] = useState(''); // vacia = la misma que la de venta
   const [activeTab, setActiveTab] = useState('celulares');
 
   const [stockCelulares, setStockCelulares] = useState([]);
@@ -891,30 +904,47 @@ function Admin() {
   const [guardando, setGuardando] = useState(false);
   const ocupado = useRef(false);
 
+  // Hay dos cotizaciones del dolar. La de venta pasa a pesos los precios, los cobros y los saldos
+  // (y es la del catalogo publico). La de costo pasa a pesos lo que cuesta la mercaderia, porque
+  // los proveedores la cotizan a otro valor. Si no se cargo una de costo, es la misma de venta.
   const cot = Number(cotizacion) || 0;
+  const cotCosto = Number(cotizacionCosto) || cot;
+  // Por cuanto se multiplica un costo en USD del stock para llevarlo a dolares de venta
+  const factorCosto = cot ? cotCosto / cot : 1;
 
   // Cotizacion con la que se cerro una venta. Las ventas anteriores a que se guardara
   // ese dato usan la cotizacion actual.
   const cotizacionDe = (v) => Number(v.cotizacion_venta) || cot;
+  // Cotizacion de costo del dia de la venta. Las ventas que no la tienen guardada usan la misma
+  // cotizacion que la venta, asi su ganancia queda como estaba.
+  const cotizacionCostoDe = (v) => Number(v.cotizacion_costo) || cotizacionDe(v);
+  // Ganancia de una venta en dolares de venta: lo cobrado en pesos menos el costo en pesos
+  // (cada uno a su cotizacion), dividido por la cotizacion de venta
+  const gananciaDe = (v) => {
+    const cotVenta = cotizacionDe(v);
+    const factor = cotVenta ? cotizacionCostoDe(v) / cotVenta : 1;
+    return (Number(v.precio_usd) || 0) - (Number(v.costo_usd) || 0) * factor;
+  };
 
   // Parte del precio de una venta que se cobro con un equipo recibido en permuta (0 si no hubo)
   const permutaDe = (v) => Number(v.permuta_usd) || 0;
   // Lo que entro en plata por una venta: el precio menos el equipo recibido en permuta
   const cobradoDe = (v) => (Number(v.precio_usd) || 0) - permutaDe(v);
 
-  // Marca unidades como vendidas y guarda la cotizacion del dia, para que el historial en
-  // pesos no cambie cuando se mueve el dolar. En celulares guarda tambien el valor del equipo
-  // recibido en permuta (vacio si fue una venta comun). Las dos columnas son opcionales: si la
-  // base todavia no las tiene, registra la venta igual sin ese dato y avisa cuales faltaron.
+  // Marca unidades como vendidas y guarda las cotizaciones del dia (venta y costo), para que el
+  // historial en pesos y la ganancia no cambien cuando se mueve el dolar. En celulares guarda
+  // tambien el valor del equipo recibido en permuta (vacio si fue una venta comun). Esas columnas
+  // son opcionales: si la base todavia no las tiene, registra la venta igual sin ese dato y avisa
+  // cuales faltaron.
   async function marcarVendido(tabla, ids, cambios, fecha = new Date().toISOString()) {
-    const datos = { estado: 'vendido', fecha_venta: fecha, cotizacion_venta: cot, ...cambios };
+    const datos = { estado: 'vendido', fecha_venta: fecha, cotizacion_venta: cot, cotizacion_costo: cotCosto, ...cambios };
     if (tabla === 'celulares' && datos.permuta_usd === undefined) datos.permuta_usd = null;
     const omitidas = [];
     for (;;) {
       const resultado = await porTandas(ids, (tanda) => supabase.from(tabla).update(datos).in('id', tanda));
       const falta =
         resultado.error &&
-        ['cotizacion_venta', 'permuta_usd'].find((c) => c in datos && String(resultado.error.message).includes(c));
+        ['cotizacion_venta', 'cotizacion_costo', 'permuta_usd'].find((c) => c in datos && String(resultado.error.message).includes(c));
       if (!falta) return { ...resultado, omitidas };
       delete datos[falta];
       omitidas.push(falta);
@@ -990,7 +1020,11 @@ function Admin() {
     const fallo = [config, celDisponibles, accDisponibles, celVendidos, accVendidos, celRevendedor, accRevendedor, celSena, accSena].find((r) => r.error);
     if (fallo) toast.error('Error al cargar datos: ' + fallo.error.message);
 
-    if (config.data) setCotizacion(config.data.cotizacion_dolar);
+    if (config.data) {
+      setCotizacion(config.data.cotizacion_dolar);
+      // Columna opcional: sin ella (o vacia) la cotizacion de costo es la de venta
+      setCotizacionCosto(config.data.cotizacion_costo || '');
+    }
     if (celDisponibles.data) setStockCelulares(agruparStock(celDisponibles.data, claveCelular, ordenarCelulares));
     if (accDisponibles.data) setStockAccesorios(agruparStock(accDisponibles.data, claveAccesorio, ordenarAccesorios));
 
@@ -1059,22 +1093,44 @@ function Admin() {
       toast.error('La cotizacion debe ser mayor a cero');
       return;
     }
-    const { error } = await supabase.from('configuracion').update({ cotizacion_dolar: nuevaCotizacion }).eq('id', 1);
-    if (!error) toast.success('Cotizacion actualizada');
-    else toast.error('Error al guardar: ' + error.message);
+    // La de costo se puede dejar vacia: en ese caso se usa la de venta
+    const escrita = String(cotizacionCosto === null || cotizacionCosto === undefined ? '' : cotizacionCosto).trim();
+    const nuevaCosto = escrita === '' ? null : parseFloat(escrita);
+    if (nuevaCosto !== null && !(nuevaCosto > 0)) {
+      toast.error('La cotizacion de costo debe ser mayor a cero (o vacia para usar la de venta)');
+      return;
+    }
+    let { error } = await supabase
+      .from('configuracion')
+      .update({ cotizacion_dolar: nuevaCotizacion, cotizacion_costo: nuevaCosto })
+      .eq('id', 1);
+    // La cotizacion de costo vive en una columna opcional: si la base todavia no la tiene, se
+    // guarda la de venta sola
+    const faltaColumna = Boolean(error) && String(error.message).includes('cotizacion_costo');
+    if (faltaColumna) {
+      ({ error } = await supabase.from('configuracion').update({ cotizacion_dolar: nuevaCotizacion }).eq('id', 1));
+    }
+    if (error) toast.error('Error al guardar: ' + error.message);
+    else if (faltaColumna && nuevaCosto !== null) {
+      setCotizacionCosto('');
+      toast.error(
+        'Se guardo la cotizacion de venta, pero no la de costo: falta actualizar la base de datos (correr el SQL).',
+        { duration: 8000 }
+      );
+    } else toast.success(nuevaCosto !== null ? 'Cotizaciones actualizadas' : 'Cotizacion actualizada');
   }
 
   // ---------- CSV ----------
   const escaparCsv = (valor) => '"' + String(valor === null || valor === undefined ? '' : valor).replace(/"/g, '""') + '"';
 
   const exportarCSV = () => {
-    let csv = '﻿Categoria,Producto,Color,Fecha Venta,Cantidad,Costo USD,Venta USD,Recibido en permuta USD,Cobrado USD,Ganancia USD,Cotizacion,Cobrado ARS\n';
+    let csv = '﻿Categoria,Producto,Color,Fecha Venta,Cantidad,Costo USD,Venta USD,Recibido en permuta USD,Cobrado USD,Ganancia USD,Cotizacion,Cobrado ARS,Cotizacion costo\n';
     ventasAgrupadas.forEach((v) => {
       const fecha = v.fecha_venta ? new Date(v.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha';
-      const ganancia = (v.precio_usd - v.costo_usd).toFixed(2);
+      const ganancia = gananciaDe(v).toFixed(2);
       const cat = v.categoria === 'celular' ? 'Celular' : v.categoria === 'cobro' ? CUENTAS[v.cuenta].cobroCsv : 'Accesorio';
       const producto = v.categoria === 'celular' ? v.modelo + ' ' + v.capacidad : v.categoria === 'cobro' ? v.revendedor : v.tipo + ' ' + v.modelo;
-      csv += [escaparCsv(cat), escaparCsv(producto), escaparCsv(v.color), escaparCsv(fecha), v.cantidad, redondear(v.costo_usd), redondear(v.precio_usd), redondear(permutaDe(v)), redondear(cobradoDe(v)), ganancia, cotizacionDe(v), Math.round(cobradoDe(v) * cotizacionDe(v))].join(',') + '\n';
+      csv += [escaparCsv(cat), escaparCsv(producto), escaparCsv(v.color), escaparCsv(fecha), v.cantidad, redondear(v.costo_usd), redondear(v.precio_usd), redondear(permutaDe(v)), redondear(cobradoDe(v)), ganancia, cotizacionDe(v), Math.round(cobradoDe(v) * cotizacionDe(v)), cotizacionCostoDe(v)].join(',') + '\n';
     });
 
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -1147,11 +1203,15 @@ function Admin() {
       toast.error('La cotizacion debe ser mayor a cero');
       return;
     }
-    const costoUsd = redondear(parseFloat(formPermuta.precio_ars) / cot);
-    // Si no se indica precio de venta, queda igualado al costo
+    // El valor de toma (en pesos) es el costo del equipo recibido: se guarda en USD a la cotizacion
+    // de costo, para que su costo en pesos sea exactamente lo que se tomo. Como parte de pago de la
+    // venta se descuenta a la cotizacion de venta, igual que el resto de lo cobrado.
+    const tomaUsd = redondear(parseFloat(formPermuta.precio_ars) / cot);
+    const costoUsd = redondear(parseFloat(formPermuta.precio_ars) / cotCosto);
+    // Si no se indica precio de venta, queda igualado al costo (el mismo monto en pesos)
     const ventaUsd = formPermuta.precio_venta_ars
       ? redondear(parseFloat(formPermuta.precio_venta_ars) / cot)
-      : costoUsd;
+      : tomaUsd;
 
     const filaBase = {
       modelo: formPermuta.modelo.trim().toUpperCase(),
@@ -1175,7 +1235,7 @@ function Admin() {
       // cobrada la diferencia, y el equipo recibido suma cuando se venda.
       const { error: errorEntrega, omitidas } = await marcarVendido('celulares', [lotePermuta.ids[0]], {
         precio_usd: lotePermuta.precio_usd,
-        permuta_usd: costoUsd,
+        permuta_usd: tomaUsd,
       });
       if (errorEntrega) toast.error('El equipo recibido se cargo, pero no se pudo registrar la entrega: ' + errorEntrega.message);
       else if (omitidas.includes('permuta_usd')) {
@@ -1413,7 +1473,8 @@ function Admin() {
         const creditoUsd = g.pagadoUsd - g.aplicadoUsd;
         const creditoArs = g.pagadoArs - g.aplicadoArs;
         // Margen = parte del precio acordado que es ganancia, sobre todos los equipos que tiene
-        const margen = g.totalUsd > 0 ? (g.totalUsd - g.costoTotalUsd) / g.totalUsd : 0;
+        // (con el costo a la cotizacion de costo)
+        const margen = g.totalUsd > 0 ? (g.totalUsd - g.costoTotalUsd * factorCosto) / g.totalUsd : 0;
         return { ...g, lotes: Object.values(g.lotes), creditoUsd, creditoArs, margen, saldoUsd: g.totalUsd - creditoUsd };
       })
       .sort((a, b) => comparar(a.nombre, b.nombre));
@@ -2198,8 +2259,8 @@ function Admin() {
   }
 
   // ---------- Datos derivados ----------
-  const statsCelulares = calcularStats(stockCelulares, cot);
-  const statsAccesorios = calcularStats(stockAccesorios, cot);
+  const statsCelulares = calcularStats(stockCelulares, cot, cotCosto);
+  const statsAccesorios = calcularStats(stockAccesorios, cot, cotCosto);
 
   // Buscador del stock: todas las palabras escritas deben aparecer en alguno de los campos
   const filtrarStock = (lista, campos) => {
@@ -2297,9 +2358,11 @@ function Admin() {
   // Los cobros a cuenta no son unidades vendidas: no suman en "Items vendidos"
   const totalVendidos = ventasFiltradas.filter((v) => v.categoria !== 'cobro').length;
   const cobrosFiltrados = ventasFiltradas.filter((v) => v.categoria === 'cobro');
-  const gananciaCobrosUSD = cobrosFiltrados.reduce((acc, v) => acc + (v.precio_usd - v.costo_usd), 0);
-  const gananciaVentasUSD = ventasFiltradas.reduce((acc, item) => acc + (item.precio_usd - item.costo_usd), 0);
-  const gananciaVentasARS = ventasFiltradas.reduce((acc, item) => acc + (item.precio_usd - item.costo_usd) * cotizacionDe(item), 0);
+  const gananciaCobrosUSD = cobrosFiltrados.reduce((acc, v) => acc + gananciaDe(v), 0);
+  const gananciaVentasUSD = ventasFiltradas.reduce((acc, item) => acc + gananciaDe(item), 0);
+  const gananciaVentasARS = ventasFiltradas.reduce((acc, item) => acc + gananciaDe(item) * cotizacionDe(item), 0);
+  // Hay ventas cuyo costo se paso a pesos con una cotizacion distinta de la de venta
+  const hayCotizacionCosto = ventasFiltradas.some((v) => cotizacionCostoDe(v) !== cotizacionDe(v));
 
   // En el historial, las unidades iguales que salieron en la misma venta (mismo momento, mismo
   // precio) van en un solo renglon: "20 x Funda". precio_usd y costo_usd pasan a ser los totales
@@ -2318,6 +2381,7 @@ function Admin() {
               v.fecha_venta,
               precio,
               Number(v.cotizacion_venta) || 0,
+              Number(v.cotizacion_costo) || 0,
               permutaDe(v),
             ].join('|');
       const grupo = grupos.get(clave);
@@ -2366,7 +2430,7 @@ function Admin() {
     .reverse()
     .map((mes) => {
       const ventasMes = movimientosGlobales.filter((v) => obtenerMesAnio(v.fecha_venta) === mes);
-      const ganancia = ventasMes.reduce((acc, c) => acc + (c.precio_usd - c.costo_usd), 0);
+      const ganancia = ventasMes.reduce((acc, c) => acc + gananciaDe(c), 0);
       const [, month] = mes.split('-');
       return { name: MESES[parseInt(month) - 1] + ' ' + mes.slice(0, 4), Ganancia: redondear(ganancia) };
     });
@@ -2377,7 +2441,7 @@ function Admin() {
     const totales = {};
     ventasFiltradas.forEach((v) => {
       const nombre = String((v.categoria === 'celular' ? v.modelo : v.categoria === 'cobro' ? 'Cobros a cuenta (estimado)' : v.tipo) || 'Sin nombre').trim();
-      totales[nombre] = (totales[nombre] || 0) + (v.precio_usd - v.costo_usd);
+      totales[nombre] = (totales[nombre] || 0) + gananciaDe(v);
     });
     const ordenados = Object.entries(totales)
       .map(([name, ganancia]) => ({ name, Ganancia: redondear(ganancia) }))
@@ -2430,20 +2494,35 @@ function Admin() {
             </button>
           </div>
         </div>
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] md:flex gap-2 md:gap-3 items-stretch">
-          <label className="flex items-center min-w-0 bg-white p-1.5 rounded-xl shadow-sm border border-gray-200">
-            <span className="font-semibold px-2 text-green-600 text-[11px] md:text-xs uppercase">Cotizacion $</span>
+        {/* Dos cotizaciones: la de venta (precios y cobros) y la de costo (mercaderia). La de costo
+            vacia usa la de venta. */}
+        <div className="grid grid-cols-2 md:flex gap-2 md:gap-3 items-stretch">
+          <label className="flex items-center min-w-0 bg-white p-1.5 rounded-xl shadow-sm border border-gray-200" title="Cotizacion del dolar para los precios de venta, los cobros y el catalogo">
+            <span className="font-semibold px-2 text-green-600 text-[11px] md:text-xs uppercase whitespace-nowrap">Venta $</span>
             <input
               type="number"
               min="0"
+              aria-label="Cotizacion de venta"
               value={cotizacion}
               onChange={(e) => setCotizacion(e.target.value)}
               className="flex-1 min-w-0 md:flex-none md:w-20 border-l pl-2 py-1 outline-none font-bold text-base md:text-sm text-gray-700 bg-transparent"
             />
           </label>
+          <label className="flex items-center min-w-0 bg-white p-1.5 rounded-xl shadow-sm border border-gray-200" title="Cotizacion del dolar para el costo de la mercaderia. Vacia = la misma que la de venta">
+            <span className="font-semibold px-2 text-red-500 text-[11px] md:text-xs uppercase whitespace-nowrap">Costo $</span>
+            <input
+              type="number"
+              min="0"
+              aria-label="Cotizacion de costo"
+              value={cotizacionCosto}
+              placeholder={String(cotizacion)}
+              onChange={(e) => setCotizacionCosto(e.target.value)}
+              className="flex-1 min-w-0 md:flex-none md:w-20 border-l pl-2 py-1 outline-none font-bold text-base md:text-sm text-gray-700 bg-transparent"
+            />
+          </label>
           <button
             onClick={conBloqueo(handleActualizarConfiguracion)}
-            className="bg-gray-900 text-white px-4 py-2.5 md:py-2 rounded-lg text-sm font-medium hover:bg-gray-800 transition"
+            className="col-span-2 md:col-span-1 bg-gray-900 text-white px-4 py-2.5 md:py-2 rounded-lg text-sm font-medium hover:bg-gray-800 transition"
           >
             Guardar
           </button>
@@ -2500,7 +2579,7 @@ function Admin() {
                   <input required name="bateria" value={formCelular.bateria} onChange={handleChangeCelular} type="number" min="0" max="100" placeholder="Bateria %" className={claseInput} />
                   <div className="flex flex-col min-w-0">
                     <input required name="costo_usd" value={formCelular.costo_usd} onChange={handleChangeCelular} type="number" min="0" step="any" placeholder="Costo (USD)" className={claseInput} />
-                    <PesosDe usd={formCelular.costo_usd} cot={cot} />
+                    <PesosDe usd={formCelular.costo_usd} cot={cotCosto} />
                   </div>
                   <div className="flex flex-col min-w-0">
                     <input required name="precio_usd" value={formCelular.precio_usd} onChange={handleChangeCelular} type="number" min="0" step="any" placeholder="Venta (USD)" className={claseInput} />
@@ -2556,7 +2635,7 @@ function Admin() {
                         </Campo>
                         <Campo etiqueta="Costo USD">
                           <input className={claseInputEdicion} name="costo_usd" type="number" min="0" step="any" value={formEdicionCelular.costo_usd ?? ''} onChange={handleChangeEdicionCelular} />
-                          <PesosDe usd={formEdicionCelular.costo_usd} cot={cot} />
+                          <PesosDe usd={formEdicionCelular.costo_usd} cot={cotCosto} />
                         </Campo>
                         <Campo etiqueta="Venta USD">
                           <input className={claseInputEdicion} name="precio_usd" type="number" min="0" step="any" value={formEdicionCelular.precio_usd ?? ''} onChange={handleChangeEdicionCelular} />
@@ -2586,6 +2665,7 @@ function Admin() {
                       titulo={celu.modelo + ' ' + (celu.capacidad || '')}
                       subtitulo={['Bateria ' + celu.bateria + '%', celu.detalles].filter(Boolean)}
                       cot={cot}
+                      cotCosto={cotCosto}
                       onOpciones={(e) => abrirMenu(e, celu, 'celulares')}
                     />
                   )
@@ -2638,7 +2718,7 @@ function Admin() {
                   />
                   <div className="flex flex-col min-w-0">
                     <input required name="costo_usd" value={formAccesorio.costo_usd} onChange={handleChangeAccesorio} type="number" min="0" step="any" placeholder="Costo (USD)" className={claseInput} />
-                    <PesosDe usd={formAccesorio.costo_usd} cot={cot} />
+                    <PesosDe usd={formAccesorio.costo_usd} cot={cotCosto} />
                   </div>
                   <div className="flex flex-col min-w-0">
                     <input required name="precio_usd" value={formAccesorio.precio_usd} onChange={handleChangeAccesorio} type="number" min="0" step="any" placeholder="Venta (USD)" className={claseInput} />
@@ -2691,7 +2771,7 @@ function Admin() {
                         </Campo>
                         <Campo etiqueta="Costo USD">
                           <input className={claseInputEdicion} name="costo_usd" type="number" min="0" step="any" value={formEdicionAccesorio.costo_usd ?? ''} onChange={handleChangeEdicionAccesorio} />
-                          <PesosDe usd={formEdicionAccesorio.costo_usd} cot={cot} />
+                          <PesosDe usd={formEdicionAccesorio.costo_usd} cot={cotCosto} />
                         </Campo>
                         <Campo etiqueta="Venta USD">
                           <input className={claseInputEdicion} name="precio_usd" type="number" min="0" step="any" value={formEdicionAccesorio.precio_usd ?? ''} onChange={handleChangeEdicionAccesorio} />
@@ -2721,6 +2801,7 @@ function Admin() {
                       titulo={acc.tipo + ' - ' + acc.modelo}
                       subtitulo={[acc.detalles, (escalas[claveAccesorio(acc)] || []).length > 0 ? 'Con precios por cantidad' : ''].filter(Boolean)}
                       cot={cot}
+                      cotCosto={cotCosto}
                       onOpciones={(e) => abrirMenu(e, acc, 'accesorios')}
                     />
                   )
@@ -3023,6 +3104,12 @@ function Admin() {
             </p>
           )}
 
+          {hayCotizacionCosto && (
+            <p className="text-[11px] md:text-xs font-medium text-gray-500">
+              La ganancia descuenta el costo a la cotizacion de costo del dia de cada venta, y se muestra en dolares a la cotizacion de venta.
+            </p>
+          )}
+
           {resumenMensual.length > 0 && (
             <div>
               <h3 className="text-xs md:text-sm font-bold text-gray-500 mb-2 uppercase tracking-wider">Total vendido por mes</h3>
@@ -3115,7 +3202,7 @@ function Admin() {
             >
               <div className="flex-grow grid grid-cols-1 sm:grid-cols-2 gap-px bg-gray-100 content-start">
                 {ventasPaginadas.map((item) => {
-                  const ganancia = item.precio_usd - item.costo_usd;
+                  const ganancia = gananciaDe(item);
                   return (
                     <div key={item.claveGrupo} className="p-3 bg-white flex items-center justify-between gap-3 hover:bg-gray-50 transition">
                       <div className="min-w-0">
@@ -4394,7 +4481,7 @@ function Admin() {
                 <label className="text-xs font-bold text-blue-800 mb-1 block">Precio tomado (Pesos ARS)</label>
                 <InputPesos required name="precio_ars" value={formPermuta.precio_ars} onChange={(v) => setFormPermuta({ ...formPermuta, precio_ars: v })} placeholder="Ej: 450.000" className="border border-blue-200 p-2.5 rounded-lg w-full bg-white outline-none font-bold text-gray-800" />
                 <p className="text-xs text-blue-600 mt-2 font-bold text-right">
-                  Costo: USD {formPermuta.precio_ars && cot ? (formPermuta.precio_ars / cot).toFixed(2) : '0.00'}
+                  Costo: USD {formPermuta.precio_ars && cotCosto ? (formPermuta.precio_ars / cotCosto).toFixed(2) : '0.00'}
                 </p>
               </div>
               <div className="col-span-2 bg-green-50 p-3 rounded-lg border border-green-100">
