@@ -315,6 +315,8 @@ const CUENTAS = {
     agregado: 'Agregado al carrito de revendedor',
     etiquetaNombre: 'Nombre del revendedor',
     faltaNombre: 'Coloque el nombre del revendedor',
+    elegirNombre: 'Elegir revendedor...',
+    nombreNuevo: 'Nuevo revendedor (escribir nombre)',
     etiquetaMonto: 'Monto entregado ahora (pesos ARS)',
     ayudaMonto: '0 si no entrego nada',
     notaCarrito: 'Los equipos salen del stock disponible y del catalogo publico. Cuando el saldo llega a cero, pasan solos al historial de ventas.',
@@ -342,6 +344,8 @@ const CUENTAS = {
     agregado: 'Agregado al carrito de señas',
     etiquetaNombre: 'Nombre de quien seña',
     faltaNombre: 'Coloque el nombre de quien seña',
+    elegirNombre: 'Elegir persona...',
+    nombreNuevo: 'Otra persona (escribir nombre)',
     etiquetaMonto: 'Monto de la seña (pesos ARS)',
     ayudaMonto: 'Cuanto dejo de seña',
     notaCarrito: 'Los equipos salen del stock disponible y del catalogo publico. Cuando el saldo llega a cero, pasan solos al historial de ventas.',
@@ -410,6 +414,58 @@ function CirculoColor({ color, soloCirculo = false }) {
       title={String(color)}
       className={'inline-block shrink-0 w-3.5 h-3.5 rounded-full align-middle shadow-sm ' + (soloCirculo ? '' : 'ml-1.5 ') + encontrado[1]}
     />
+  );
+}
+
+// Desplegable con la opcion de escribir un valor que no esta en la lista. Reemplaza al campo
+// con sugerencias (<datalist>), que en los celulares no muestra la flecha ni la lista: solo
+// sugiere arriba del teclado. Si la lista esta vacia, queda solo el campo para escribir.
+const VALOR_OTRO = '__otro__';
+function ListaConOtro({ opciones, valor, onCambio, clase, vacio, otro, placeholderOtro, ariaLabel, requerido = false, empezarEscribiendo = false }) {
+  const actual = String(valor || '').trim();
+  const enLista = opciones.find((o) => o.toLowerCase() === actual.toLowerCase());
+  const [escribiendo, setEscribiendo] = useState(empezarEscribiendo || (actual !== '' && !enLista));
+
+  const elegir = (e) => {
+    if (e.target.value === VALOR_OTRO) {
+      setEscribiendo(true);
+      onCambio('');
+      return;
+    }
+    setEscribiendo(false);
+    onCambio(e.target.value);
+  };
+
+  const campo = (
+    <input
+      type="text"
+      required={requerido}
+      value={valor || ''}
+      onChange={(e) => onCambio(e.target.value)}
+      placeholder={placeholderOtro}
+      aria-label={ariaLabel}
+      className={clase}
+    />
+  );
+  if (opciones.length === 0) return campo;
+
+  return (
+    <div className="min-w-0 flex flex-col gap-2">
+      <select
+        className={clase}
+        value={escribiendo ? VALOR_OTRO : enLista || ''}
+        onChange={elegir}
+        required={requerido && !escribiendo}
+        aria-label={ariaLabel}
+      >
+        <option value="" disabled>{vacio}</option>
+        {opciones.map((o) => (
+          <option key={o} value={o}>{o}</option>
+        ))}
+        <option value={VALOR_OTRO}>{otro}</option>
+      </select>
+      {escribiendo && campo}
+    </div>
   );
 }
 
@@ -798,6 +854,7 @@ function Admin() {
   const estadoInicialPermuta = { modelo: '', capacidad: '', color: '', bateria: '', detalles: '', precio_ars: '', precio_venta_ars: '', entregaId: '' };
 
   const [formCelular, setFormCelular] = useState(estadoInicialCelular);
+  const [ingresosGuardados, setIngresosGuardados] = useState(0); // reinicia los desplegables de color
   const [formAccesorio, setFormAccesorio] = useState(estadoInicialAccesorio);
   const [formPermuta, setFormPermuta] = useState(estadoInicialPermuta);
 
@@ -825,6 +882,8 @@ function Admin() {
   const [pagosRevendedor, setPagosRevendedor] = useState([]); // pagos a cuenta todavia no aplicados
   const [pagosSena, setPagosSena] = useState([]); // lo entregado por las senas, todavia no aplicado
   const [pagoRevendedor, setPagoRevendedor] = useState(null); // { cuenta, nombre, monto (ARS) }
+  const [edicionPago, setEdicionPago] = useState(null); // { cuenta, nombre, pago, monto (ARS) }
+  const [edicionVenta, setEdicionVenta] = useState(null); // { item, precio (ARS por unidad) }
   const [suma, setSuma] = useState(null); // { item, tabla, cantidad }
   const [borrado, setBorrado] = useState(null); // { item, tabla, cantidad }
   const [resolucion, setResolucion] = useState(null); // { lote, destino, cantidad }
@@ -1056,6 +1115,7 @@ function Admin() {
     if (!resultado.error) {
       toast.success(mensajeLote(cantidad, 'equipo(s)', resultado));
       setFormCelular({ ...formCelular, cantidad: 1, color: '' });
+      setIngresosGuardados((n) => n + 1);
       cargarDatos(false);
     } else toast.error('Error al guardar: ' + resultado.error.message);
   }
@@ -1076,6 +1136,7 @@ function Admin() {
     if (!resultado.error) {
       toast.success(mensajeLote(cantidad, 'accesorio(s)', resultado));
       setFormAccesorio({ ...formAccesorio, cantidad: 1, color: '' });
+      setIngresosGuardados((n) => n + 1);
       cargarDatos(false);
     } else toast.error('Error al guardar: ' + resultado.error.message);
   }
@@ -1307,7 +1368,7 @@ function Admin() {
       if (!grupos[k]) {
         grupos[k] = {
           cuenta, nombre, unidades: 0, totalUsd: 0, costoTotalUsd: 0, lotes: {}, pagadoUsd: 0, pagadoArs: 0, pagos: 0, aplicadoUsd: 0, aplicadoArs: 0,
-          celular: '', idLista: null,
+          celular: '', idLista: null, movimientos: [],
         };
       }
       return grupos[k];
@@ -1328,6 +1389,8 @@ function Admin() {
       const g = grupo(String(pago.revendedor || '').trim() || 'Sin nombre');
       const usd = Number(pago.monto_usd) || 0;
       const ars = Number(pago.monto_ars) || 0;
+      // Detalle de la cuenta, en el orden en que se cargo (los pagos vienen ordenados por fecha)
+      g.movimientos.push({ ...pago, usd, ars });
       if (usd < 0 || ars < 0) {
         // Fila negativa: parte de lo entregado que ya se aplico a equipos marcados como pagados
         g.aplicadoUsd += -usd;
@@ -1603,6 +1666,110 @@ function Admin() {
     } else {
       toast.success('Pago registrado. Saldo de ' + nombre + ': ARS $ ' + fmt(Math.round(saldoFinal * cot)));
     }
+    cargarDatos(false);
+  }
+
+  // ---------- Corregir o eliminar un pago ya registrado ----------
+  const fechaCorta = (iso) => (iso ? new Date(iso).toLocaleDateString('es-AR') : 'Sin fecha');
+
+  const grupoEdicionPago = edicionPago ? gruposDe(edicionPago.cuenta).find((g) => g.nombre === edicionPago.nombre) : null;
+  const montoEdicionArs = edicionPago ? parseFloat(edicionPago.monto) || 0 : 0;
+  // El pago conserva la cotizacion del dia en que se cobro
+  const cotEdicionPago = edicionPago ? Number(edicionPago.pago.cotizacion) || cot : 0;
+  const usdEdicionPago = cotEdicionPago ? montoEdicionArs / cotEdicionPago : 0;
+  const saldoTrasEdicionUsd = grupoEdicionPago ? grupoEdicionPago.saldoUsd + edicionPago.pago.usd - usdEdicionPago : 0;
+
+  // Lo entregado no puede quedar por debajo de lo que ya se desconto en equipos marcados como
+  // pagados: esos equipos ya figuran como ventas cobradas con esa plata.
+  const cubreLoAplicado = (g, pago, nuevoUsd) => g.pagadoUsd - pago.usd + nuevoUsd >= g.aplicadoUsd - 0.005;
+  const avisoAplicado = (g) =>
+    'De lo que entrego ' + g.nombre + ' ya se usaron ARS $ ' + fmt(Math.round(g.aplicadoArs)) +
+    ' en equipos marcados como pagados. El total entregado no puede quedar por debajo de eso.';
+
+  async function guardarEdicionPago() {
+    const { cuenta, nombre, pago } = edicionPago;
+    const grupo = grupoEdicionPago;
+    if (!(montoEdicionArs > 0)) {
+      toast.error('Indica el monto correcto. Para sacar el pago, usa "Eliminar".');
+      return;
+    }
+    if (grupo && !cubreLoAplicado(grupo, pago, usdEdicionPago)) {
+      toast.error(avisoAplicado(grupo), { duration: 7000 });
+      return;
+    }
+    const saldoFinal = saldoTrasEdicionUsd;
+    setEdicionPago(null);
+    const { error } = await supabase
+      .from(CUENTAS[cuenta].tablaPagos)
+      .update({ monto_ars: redondear(montoEdicionArs), monto_usd: redondear(usdEdicionPago) })
+      .eq('id', pago.id);
+    if (error) {
+      toast.error('No se pudo corregir el pago: ' + error.message);
+      return;
+    }
+    if (grupo && saldoCubierto(saldoFinal) && grupo.unidades > 0) {
+      const { error: errorCierre } = await cerrarCuenta(cuenta, nombre);
+      if (errorCierre) toast.error('El pago se corrigio, pero no se pudo cerrar la cuenta: ' + errorCierre.message);
+      else toast.success('Saldo cubierto: los equipos de ' + nombre + ' quedaron como vendidos');
+    } else {
+      toast.success('Pago corregido. Saldo de ' + nombre + ': ARS $ ' + fmt(Math.round(saldoFinal * cot)));
+    }
+    cargarDatos(false);
+  }
+
+  const pedirEliminarPago = (g, pago) => {
+    if (!cubreLoAplicado(g, pago, 0)) {
+      toast.error(avisoAplicado(g), { duration: 7000 });
+      return;
+    }
+    setDialogo({
+      titulo: 'Eliminar este pago?',
+      texto:
+        'Pago de ' + g.nombre + ' del ' + fechaCorta(pago.fecha) + ' por ARS $ ' + fmt(Math.round(pago.ars)) +
+        '. Se borra y su saldo vuelve a subir por ese monto.',
+      botones: [
+        {
+          etiqueta: 'Eliminar pago',
+          clase: 'bg-red-600 hover:bg-red-700',
+          accion: async () => {
+            const { error } = await supabase.from(CUENTAS[g.cuenta].tablaPagos).delete().eq('id', pago.id);
+            if (error) toast.error('No se pudo eliminar el pago: ' + error.message);
+            else toast.success('Pago eliminado');
+            cargarDatos(false);
+          },
+        },
+      ],
+    });
+  };
+
+  // Desde Ventas: abre la cuenta de quien hizo un cobro a cuenta, para ver y corregir sus pagos
+  const verPagosDe = (cobro) => {
+    setRevAbiertos({ ...revAbiertos, [cobro.cuenta + '|' + normalizar(cobro.revendedor)]: true });
+    cambiarTab(cobro.cuenta === 'sena' ? 'senas' : 'revendedores');
+  };
+
+  // ---------- Corregir el precio de una venta ya registrada ----------
+  const abrirEdicionVenta = (item) =>
+    setEdicionVenta({ item, precio: Math.round(item.precioUnidadUsd * cotizacionDe(item)) });
+
+  const precioEdicionVentaArs = edicionVenta ? parseFloat(edicionVenta.precio) : NaN;
+
+  async function guardarEdicionVenta() {
+    const { item } = edicionVenta;
+    if (!(precioEdicionVentaArs >= 0)) {
+      toast.error('Indica el precio correcto');
+      return;
+    }
+    const tabla = item.categoria === 'celular' ? 'celulares' : 'accesorios';
+    // Se convierte con la cotizacion del dia de la venta, para no mover el resto del historial
+    const precioUsd = redondear(precioEdicionVentaArs / cotizacionDe(item));
+    setEdicionVenta(null);
+    const { error } = await porTandas(item.ids, (tanda) => supabase.from(tabla).update({ precio_usd: precioUsd }).in('id', tanda));
+    if (error) {
+      toast.error('No se pudo corregir la venta: ' + error.message);
+      return;
+    }
+    toast.success('Venta corregida');
     cargarDatos(false);
   }
 
@@ -2245,13 +2412,6 @@ function Admin() {
 
   return (
     <div className="min-h-screen p-3 md:p-8 text-gray-800 bg-gray-50 overflow-x-hidden">
-      {/* Lista de colores sugeridos: autocompleta pero permite escribir cualquier color */}
-      <datalist id="lista-colores">
-        {COLORES.map((color) => (
-          <option key={color} value={color} />
-        ))}
-      </datalist>
-
       {/* HEADER */}
       <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4 max-w-6xl mx-auto mb-6 pb-4 border-b border-gray-200">
         <div>
@@ -2325,7 +2485,18 @@ function Admin() {
                 <div className="flex-1 grid grid-cols-2 md:grid-cols-4 gap-3">
                   <input required name="modelo" value={formCelular.modelo} onChange={handleChangeCelular} type="text" placeholder="Mod. (Ej: 14 PRO)" className={claseInput} />
                   <input required name="capacidad" value={formCelular.capacidad} onChange={handleChangeCelular} type="text" placeholder="Cap. (Ej: 128)" className={claseInput} />
-                  <input required name="color" list="lista-colores" value={formCelular.color} onChange={handleChangeCelular} type="text" placeholder="Color" className={claseInput} />
+                  <ListaConOtro
+                    key={'color-celular-' + ingresosGuardados}
+                    opciones={COLORES}
+                    valor={formCelular.color}
+                    onCambio={(color) => setFormCelular({ ...formCelular, color })}
+                    clase={claseInput}
+                    vacio="Color..."
+                    otro="Otro (escribir)"
+                    placeholderOtro="Escribi el color"
+                    ariaLabel="Color"
+                    requerido
+                  />
                   <input required name="bateria" value={formCelular.bateria} onChange={handleChangeCelular} type="number" min="0" max="100" placeholder="Bateria %" className={claseInput} />
                   <div className="flex flex-col min-w-0">
                     <input required name="costo_usd" value={formCelular.costo_usd} onChange={handleChangeCelular} type="number" min="0" step="any" placeholder="Costo (USD)" className={claseInput} />
@@ -2453,7 +2624,18 @@ function Admin() {
                 <div className="flex-1 grid grid-cols-2 md:grid-cols-3 gap-3">
                   <input required name="tipo" value={formAccesorio.tipo} onChange={handleChangeAccesorio} type="text" placeholder="Tipo (Ej: Funda)" className={claseInput} />
                   <input required name="modelo" value={formAccesorio.modelo} onChange={handleChangeAccesorio} type="text" placeholder="Mod. (Ej: iPhone 13)" className={claseInput} />
-                  <input required name="color" list="lista-colores" value={formAccesorio.color} onChange={handleChangeAccesorio} type="text" placeholder="Color / Diseno" className={claseInput} />
+                  <ListaConOtro
+                    key={'color-accesorio-' + ingresosGuardados}
+                    opciones={COLORES}
+                    valor={formAccesorio.color}
+                    onCambio={(color) => setFormAccesorio({ ...formAccesorio, color })}
+                    clase={claseInput}
+                    vacio="Color / Diseno..."
+                    otro="Otro (escribir)"
+                    placeholderOtro="Escribi el color o diseno"
+                    ariaLabel="Color o diseno"
+                    requerido
+                  />
                   <div className="flex flex-col min-w-0">
                     <input required name="costo_usd" value={formAccesorio.costo_usd} onChange={handleChangeAccesorio} type="number" min="0" step="any" placeholder="Costo (USD)" className={claseInput} />
                     <PesosDe usd={formAccesorio.costo_usd} cot={cot} />
@@ -2653,6 +2835,45 @@ function Admin() {
                     </span>
                   )}
                 </div>
+                )}
+                {g.movimientos.length > 0 && (
+                  <div className="px-3 md:px-4 py-2 border-b border-gray-200">
+                    <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">Pagos registrados</p>
+                    <ul className="mt-1 divide-y divide-gray-100">
+                      {g.movimientos.map((m) =>
+                        m.usd < 0 || m.ars < 0 ? (
+                          <li key={m.id} className="py-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-xs font-medium text-gray-500">
+                            <span>{fechaCorta(m.fecha)} - Usado en equipos marcados como pagados</span>
+                            <span className="font-bold">- ARS $ {fmt(Math.round(-m.ars))}</span>
+                          </li>
+                        ) : (
+                          <li key={m.id} className="py-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-xs">
+                            <span className="font-semibold text-gray-600">{fechaCorta(m.fecha)}</span>
+                            <span className="flex-1 font-bold text-gray-900">
+                              ARS $ {fmt(Math.round(m.ars))}
+                              <span className="font-medium text-gray-500"> (USD {fmt(m.usd)})</span>
+                            </span>
+                            <span className="flex gap-3">
+                              <button
+                                type="button"
+                                onClick={() => setEdicionPago({ cuenta: g.cuenta, nombre: g.nombre, pago: m, monto: Math.round(m.ars) })}
+                                className="font-bold text-blue-600 hover:underline py-1"
+                              >
+                                Editar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => pedirEliminarPago(g, m)}
+                                className="font-bold text-red-500 hover:underline py-1"
+                              >
+                                Eliminar
+                              </button>
+                            </span>
+                          </li>
+                        )
+                      )}
+                    </ul>
+                  </div>
                 )}
                 <div className="px-3 md:px-4 py-2 border-b border-gray-200 flex flex-wrap gap-2">
                   {tieneMovimientos(g) && (
@@ -2942,14 +3163,21 @@ function Admin() {
                           {ganancia < 0 ? '-' : '+'} $ {fmt(Math.abs(ganancia))}
                         </span>
                         {item.categoria === 'cobro' ? (
-                          <span className="text-[11px] font-bold text-purple-700 py-1">Estimado</span>
+                          <span className="flex items-center gap-3 py-1 text-[11px] font-bold">
+                            <span className="text-purple-700">Estimado</span>
+                            <button onClick={() => verPagosDe(item)} className="text-blue-600 hover:underline">
+                              Ver pagos
+                            </button>
+                          </span>
                         ) : (
-                          <button
-                            onClick={() => confirmarAnulacion(item)}
-                            className="text-[11px] font-bold text-gray-400 hover:text-red-500 hover:underline py-1"
-                          >
-                            Anular venta
-                          </button>
+                          <span className="flex items-center gap-3 py-1 text-[11px] font-bold">
+                            <button onClick={() => abrirEdicionVenta(item)} className="text-blue-600 hover:underline">
+                              Editar
+                            </button>
+                            <button onClick={() => confirmarAnulacion(item)} className="text-gray-400 hover:text-red-500 hover:underline">
+                              Anular venta
+                            </button>
+                          </span>
                         )}
                       </div>
                     </div>
@@ -3153,20 +3381,19 @@ function Admin() {
             <h2 className="text-xl font-bold text-gray-800">{textosCarrito.carrito}</h2>
 
             <label className="text-xs font-bold text-gray-600 mt-4 mb-1 block">{textosCarrito.etiquetaNombre}</label>
-            <input
-              required
-              type="text"
-              list="lista-revendedores"
-              value={carritoNombre}
-              onChange={(e) => setCarritoNombre(e.target.value)}
-              placeholder={textosCarrito.faltaNombre}
-              className={claseInputModal}
+            {/* En una seña suele ser una persona nueva: arranca listo para escribir el nombre */}
+            <ListaConOtro
+              opciones={gruposDe(carritoCuenta).map((g) => g.nombre)}
+              valor={carritoNombre}
+              onCambio={setCarritoNombre}
+              clase={claseInputModal}
+              vacio={textosCarrito.elegirNombre}
+              otro={textosCarrito.nombreNuevo}
+              placeholderOtro={textosCarrito.faltaNombre}
+              ariaLabel={textosCarrito.etiquetaNombre}
+              requerido
+              empezarEscribiendo={carritoCuenta === 'sena'}
             />
-            <datalist id="lista-revendedores">
-              {gruposDe(carritoCuenta).map((g) => (
-                <option key={g.nombre} value={g.nombre} />
-              ))}
-            </datalist>
 
             {carritoCuenta === 'revendedor' && carritoNombre.trim() && !grupoCarrito && (
               <Fragment>
@@ -3462,6 +3689,108 @@ function Admin() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* MODAL: CORREGIR UN PAGO YA REGISTRADO */}
+      {edicionPago && grupoEdicionPago && (
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <form
+            onSubmit={conBloqueo(guardarEdicionPago)}
+            autoComplete="off"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto"
+          >
+            <h2 className="text-xl font-bold text-gray-800">Corregir pago</h2>
+            <p className="text-sm font-semibold text-gray-600 mt-1 break-words">
+              {grupoEdicionPago.nombre} - pago del {fechaCorta(edicionPago.pago.fecha)}
+            </p>
+
+            <div className="mt-3 flex justify-between gap-2 text-sm font-semibold text-gray-600">
+              <span>Monto anotado</span>
+              <span className="font-black text-gray-900">ARS $ {fmt(Math.round(edicionPago.pago.ars))}</span>
+            </div>
+
+            <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">Monto correcto (pesos ARS)</label>
+            <InputPesos
+              required
+              autoFocus
+              value={edicionPago.monto}
+              onChange={(monto) => setEdicionPago({ ...edicionPago, monto })}
+              className={claseInputModal + ' font-bold'}
+            />
+
+            <div className="mt-3 bg-gray-50 border border-gray-200 rounded-lg p-3">
+              <div className="flex justify-between gap-2 text-base font-black text-gray-900">
+                <span>{saldoTrasEdicionUsd < -0.005 ? 'Queda a su favor' : 'Saldo despues de corregir'}</span>
+                <span>ARS $ {fmt(Math.round(Math.abs(saldoTrasEdicionUsd) * cot))}</span>
+              </div>
+              <p className="text-[11px] font-medium text-gray-500 mt-1">
+                {saldoCubierto(saldoTrasEdicionUsd) && grupoEdicionPago.unidades > 0
+                  ? 'Con este monto el saldo queda cubierto: sus equipos pasan al historial de ventas.'
+                  : 'Se mantiene la cotizacion del dia del pago ($ ' + fmt(cotEdicionPago) + ').'}
+              </p>
+            </div>
+
+            <div className="flex gap-3 mt-4">
+              <button type="button" onClick={() => setEdicionPago(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
+                Cancelar
+              </button>
+              <button type="submit" disabled={guardando} className="disabled:opacity-60 flex-1 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition">
+                Guardar
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* MODAL: CORREGIR EL PRECIO DE UNA VENTA */}
+      {edicionVenta && (
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <form
+            onSubmit={conBloqueo(guardarEdicionVenta)}
+            autoComplete="off"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto"
+          >
+            <h2 className="text-xl font-bold text-gray-800">Corregir venta</h2>
+            <p className="text-sm font-semibold text-gray-600 mt-1 break-words">
+              {edicionVenta.item.cantidad > 1 ? edicionVenta.item.cantidad + ' x ' : ''}
+              {nombreItem(edicionVenta.item, edicionVenta.item.categoria === 'celular' ? 'celulares' : 'accesorios')} - venta del{' '}
+              {fechaCorta(edicionVenta.item.fecha_venta)}
+            </p>
+
+            <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">
+              Precio de venta{edicionVenta.item.cantidad > 1 ? ' por unidad' : ''} (pesos ARS)
+            </label>
+            <InputPesos
+              required
+              autoFocus
+              value={edicionVenta.precio}
+              onChange={(precio) => setEdicionVenta({ ...edicionVenta, precio })}
+              className={claseInputModal + ' font-bold'}
+            />
+
+            <div className="mt-3 bg-gray-50 border border-gray-200 rounded-lg p-3">
+              {edicionVenta.item.cantidad > 1 && (
+                <div className="flex justify-between gap-2 text-base font-black text-gray-900">
+                  <span>Total ({edicionVenta.item.cantidad} u.)</span>
+                  <span>ARS $ {fmt(Math.round((precioEdicionVentaArs || 0) * edicionVenta.item.cantidad))}</span>
+                </div>
+              )}
+              <p className="text-[11px] font-medium text-gray-500 mt-1">
+                Se usa la cotizacion del dia de la venta ($ {fmt(cotizacionDe(edicionVenta.item))}). La ganancia se recalcula sola.
+                {permutaDe(edicionVenta.item) > 0 ? ' En una permuta este es el precio total del equipo: lo cobrado es ese precio menos el equipo recibido.' : ''}
+              </p>
+            </div>
+
+            <div className="flex gap-3 mt-4">
+              <button type="button" onClick={() => setEdicionVenta(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
+                Cancelar
+              </button>
+              <button type="submit" disabled={guardando} className="disabled:opacity-60 flex-1 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition">
+                Guardar
+              </button>
+            </div>
+          </form>
         </div>
       )}
 
@@ -4045,7 +4374,17 @@ function Admin() {
               </div>
               <div className="col-span-2">
                 <label className="text-xs font-bold text-gray-600 mb-1 block">Color</label>
-                <input required name="color" list="lista-colores" value={formPermuta.color} onChange={handleChangePermuta} type="text" placeholder="Elegir o escribir" className={claseInputModal} />
+                <ListaConOtro
+                  opciones={COLORES}
+                  valor={formPermuta.color}
+                  onCambio={(color) => setFormPermuta({ ...formPermuta, color })}
+                  clase={claseInputModal}
+                  vacio="Elegir color..."
+                  otro="Otro (escribir)"
+                  placeholderOtro="Escribi el color"
+                  ariaLabel="Color"
+                  requerido
+                />
               </div>
               <div className="col-span-2">
                 <label className="text-xs font-bold text-gray-600 mb-1 block">Detalles (estado, rayas, caja, etc.)</label>
