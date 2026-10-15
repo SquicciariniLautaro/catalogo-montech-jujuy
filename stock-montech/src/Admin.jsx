@@ -333,7 +333,7 @@ const CUENTAS = {
     devolver: 'Devolvio',
     tituloDevolucion: 'El revendedor devolvio',
     preguntaDevolucion: 'Cuantas unidades devolvio?',
-    notaDevolucion: 'Vuelve al stock disponible con su precio de venta original.',
+    notaDevolucion: 'Vuelve al stock disponible al precio actual de su lote, sin cambiar el precio de las demas unidades.',
     cobro: 'cobro a cuenta',
     cobroCsv: 'Cobro a cuenta (estimado)',
   },
@@ -362,7 +362,7 @@ const CUENTAS = {
     devolver: 'Cancelo',
     tituloDevolucion: 'Se cancelo la seña',
     preguntaDevolucion: 'Cuantas unidades se cancelan?',
-    notaDevolucion: 'Vuelve al stock disponible y al catalogo publico. Lo que ya entrego queda a su favor hasta que cierres la cuenta.',
+    notaDevolucion: 'Vuelve al stock disponible y al catalogo publico, al precio actual de su lote. Lo que ya entrego queda a su favor (si se lo devolviste, elimina ese pago desde su detalle).',
     cobro: 'seña',
     cobroCsv: 'Seña (estimado)',
   },
@@ -928,6 +928,19 @@ function Admin() {
 
   // Parte del precio de una venta que se cobro con un equipo recibido en permuta (0 si no hubo)
   const permutaDe = (v) => Number(v.permuta_usd) || 0;
+
+  // Si una venta salio de la cuenta de un revendedor o de una sena, a nombre de quien. Las ventas
+  // anteriores a que se guardara de que cuenta salieron se reconocen por el nombre: los
+  // revendedores estan en la lista guardada. Devuelve null en las ventas directas del local.
+  const origenDeVenta = (v) => {
+    const nombre = String(v.revendedor || '').trim();
+    if (v.categoria === 'cobro' || !nombre) return null;
+    if (v.cuenta_venta === 'revendedor' || v.cuenta_venta === 'sena') return { cuenta: v.cuenta_venta, nombre };
+    const enLista = listaRevendedores.some((r) => r.clave === normalizar(nombre));
+    return { cuenta: enLista ? 'revendedor' : null, nombre };
+  };
+  const textoOrigen = (o) =>
+    o.cuenta === 'revendedor' ? 'Revendedor: ' + o.nombre : o.cuenta === 'sena' ? 'Seña de ' + o.nombre : 'Cuenta de ' + o.nombre;
   // Lo que entro en plata por una venta: el precio menos el equipo recibido en permuta
   const cobradoDe = (v) => (Number(v.precio_usd) || 0) - permutaDe(v);
 
@@ -939,12 +952,17 @@ function Admin() {
   async function marcarVendido(tabla, ids, cambios, fecha = new Date().toISOString()) {
     const datos = { estado: 'vendido', fecha_venta: fecha, cotizacion_venta: cot, cotizacion_costo: cotCosto, ...cambios };
     if (tabla === 'celulares' && datos.permuta_usd === undefined) datos.permuta_usd = null;
+    // Las ventas de una cuenta (revendedor o sena) guardan de cual salieron y conservan el nombre.
+    // Una venta directa del local no viene de ninguna: se limpian datos de entregas anteriores.
+    if (datos.cuenta_venta === undefined) {
+      Object.assign(datos, { cuenta_venta: null, revendedor: null, precio_revendedor: null, fecha_revendedor: null });
+    }
     const omitidas = [];
     for (;;) {
       const resultado = await porTandas(ids, (tanda) => supabase.from(tabla).update(datos).in('id', tanda));
       const falta =
         resultado.error &&
-        ['cotizacion_venta', 'cotizacion_costo', 'permuta_usd'].find((c) => c in datos && String(resultado.error.message).includes(c));
+        ['cotizacion_venta', 'cotizacion_costo', 'permuta_usd', 'cuenta_venta'].find((c) => c in datos && String(resultado.error.message).includes(c));
       if (!falta) return { ...resultado, omitidas };
       delete datos[falta];
       omitidas.push(falta);
@@ -1124,13 +1142,13 @@ function Admin() {
   const escaparCsv = (valor) => '"' + String(valor === null || valor === undefined ? '' : valor).replace(/"/g, '""') + '"';
 
   const exportarCSV = () => {
-    let csv = '﻿Categoria,Producto,Color,Fecha Venta,Cantidad,Costo USD,Venta USD,Recibido en permuta USD,Cobrado USD,Ganancia USD,Cotizacion,Cobrado ARS,Cotizacion costo\n';
+    let csv = '﻿Categoria,Producto,Color,Fecha Venta,Cantidad,Costo USD,Venta USD,Recibido en permuta USD,Cobrado USD,Ganancia USD,Cotizacion,Cobrado ARS,Cotizacion costo,Revendedor o seña\n';
     ventasAgrupadas.forEach((v) => {
       const fecha = v.fecha_venta ? new Date(v.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha';
       const ganancia = gananciaDe(v).toFixed(2);
       const cat = v.categoria === 'celular' ? 'Celular' : v.categoria === 'cobro' ? CUENTAS[v.cuenta].cobroCsv : 'Accesorio';
       const producto = v.categoria === 'celular' ? v.modelo + ' ' + v.capacidad : v.categoria === 'cobro' ? v.revendedor : v.tipo + ' ' + v.modelo;
-      csv += [escaparCsv(cat), escaparCsv(producto), escaparCsv(v.color), escaparCsv(fecha), v.cantidad, redondear(v.costo_usd), redondear(v.precio_usd), redondear(permutaDe(v)), redondear(cobradoDe(v)), ganancia, cotizacionDe(v), Math.round(cobradoDe(v) * cotizacionDe(v)), cotizacionCostoDe(v)].join(',') + '\n';
+      csv += [escaparCsv(cat), escaparCsv(producto), escaparCsv(v.color), escaparCsv(fecha), v.cantidad, redondear(v.costo_usd), redondear(v.precio_usd), redondear(permutaDe(v)), redondear(cobradoDe(v)), ganancia, cotizacionDe(v), Math.round(cobradoDe(v) * cotizacionDe(v)), cotizacionCostoDe(v), escaparCsv(origenDeVenta(v) ? textoOrigen(origenDeVenta(v)) : '')].join(',') + '\n';
     });
 
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -1287,11 +1305,27 @@ function Admin() {
   const precioManualArs = venta && venta.tabla === 'celulares' ? parseFloat(venta.precio) : NaN;
   const precioManualValido = precioManualArs >= 0 && cot > 0;
   const precioSinCambios = venta ? precioManualArs === Math.round(venta.item.precio_usd * cot) : false;
+  // En accesorios se usa el precio de lista o por cantidad, salvo que se cargue un precio especial
+  // en pesos, por unidad o por el total de la venta (por ejemplo, a un cliente con precios propios)
+  const modoPrecioAcc = venta && venta.tabla === 'accesorios' ? venta.modoPrecio || 'lista' : 'lista';
+  const precioEspecialArs = venta && venta.tabla === 'accesorios' ? parseFloat(venta.precioEspecial) : NaN;
+  const precioEspecialValido = modoPrecioAcc === 'lista' || (precioEspecialArs >= 0 && cot > 0);
   const precioVenta = !venta
     ? 0
     : venta.tabla === 'celulares'
     ? redondear(!precioManualValido ? 0 : precioSinCambios ? venta.item.precio_usd : precioManualArs / cot)
-    : redondear(escalaVenta.unitarioUsd);
+    : modoPrecioAcc === 'lista'
+    ? redondear(escalaVenta.unitarioUsd)
+    : !precioEspecialValido
+    ? 0
+    : redondear((modoPrecioAcc === 'total' ? precioEspecialArs / cantidadVenta : precioEspecialArs) / cot);
+
+  // Al elegir un precio especial, el campo arranca con el precio que corresponde hoy
+  const cambiarModoPrecioAcc = (modo) => {
+    const unitarioArs = Math.round(escalaVenta ? escalaVenta.unitarioArs : venta.item.precio_usd * cot);
+    const sugerido = modo === 'total' ? unitarioArs * cantidadVenta : modo === 'unidad' ? unitarioArs : '';
+    setVenta({ ...venta, modoPrecio: modo, precioEspecial: sugerido === '' ? '' : String(sugerido) });
+  };
 
   // Accesorios vendidos junto al celular. Cada uno puede ir a precio de lista, a un precio
   // especial (en pesos por unidad) o gratis.
@@ -1341,6 +1375,10 @@ function Admin() {
     const { item, tabla } = venta;
     if (tabla === 'celulares' && !precioManualValido) {
       toast.error('Indica el precio final de venta');
+      return;
+    }
+    if (tabla === 'accesorios' && !precioEspecialValido) {
+      toast.error('Indica el precio especial en pesos');
       return;
     }
     if (!accesoriosValidos) {
@@ -1393,7 +1431,10 @@ function Admin() {
   async function anularVenta(item, ids) {
     const tabla = item.categoria === 'celular' ? 'celulares' : 'accesorios';
     const { error } = await porTandas(ids, (tanda) =>
-      supabase.from(tabla).update({ estado: 'disponible', fecha_venta: null }).in('id', tanda)
+      supabase
+        .from(tabla)
+        .update({ estado: 'disponible', fecha_venta: null, revendedor: null, precio_revendedor: null, fecha_revendedor: null })
+        .in('id', tanda)
     );
     if (error) {
       toast.error('Error al anular la venta: ' + error.message);
@@ -1565,7 +1606,9 @@ function Admin() {
   const entregadoCarritoArs = parseFloat(carritoEntregado) || 0;
   const textosCarrito = CUENTAS[carritoCuenta];
   const grupoCarrito = gruposDe(carritoCuenta).find((g) => normalizar(g.nombre) === normalizar(carritoNombre));
+  // Saldo que ya tenia la persona: negativo si tiene plata a favor, que se descuenta del carrito
   const saldoPrevioArs = grupoCarrito ? grupoCarrito.saldoUsd * cot : 0;
+  const saldoCarritoFinalArs = saldoPrevioArs + totalCarritoArs - entregadoCarritoArs;
 
   const agregarAlCarrito = (item, tabla, cuenta = 'revendedor') => {
     // El carrito es uno solo: no se mezclan equipos para un revendedor con equipos senados
@@ -1602,9 +1645,16 @@ function Admin() {
   const quitarDelCarrito = (item) => setCarrito(carrito.filter((c) => !(c.id === item.id && c.tabla === item.tabla)));
 
   // Marca como vendidas todas las unidades de una cuenta (al precio acordado de cada una)
-  // y da por aplicados sus pagos a cuenta. Lee la base para no depender de datos viejos.
+  // y da por aplicados sus pagos a cuenta. Si entrego mas de lo que debia, lo que sobra queda
+  // como un pago nuevo a su favor, que se descuenta de lo proximo que lleve. Lee la base para
+  // no depender de datos viejos. Devuelve cuanto le quedo a favor (en pesos).
   async function cerrarCuenta(cuenta, nombre) {
     const { estado, tablaPagos } = CUENTAS[cuenta];
+    const pendientes = await traerTodo(() =>
+      supabase.from(tablaPagos).select('monto_usd, monto_ars').eq('revendedor', nombre).eq('aplicado', false).order('id')
+    );
+    if (pendientes.error) return { error: pendientes.error };
+    let deudaUsd = 0;
     for (const tabla of ['celulares', 'accesorios']) {
       const { data, error } = await traerTodo(() =>
         supabase.from(tabla).select('id, precio_usd, precio_revendedor').eq('estado', estado).eq('revendedor', nombre).order('id')
@@ -1613,15 +1663,39 @@ function Admin() {
       const porPrecio = {};
       (data || []).forEach((u) => {
         const precio = precioAcordado(u);
+        deudaUsd += precio;
         (porPrecio[precio] = porPrecio[precio] || []).push(u.id);
       });
       for (const [precio, ids] of Object.entries(porPrecio)) {
-        const { error: errorVenta } = await marcarVendido(tabla, ids, { precio_usd: Number(precio) });
+        const { error: errorVenta } = await marcarVendido(tabla, ids, { precio_usd: Number(precio), cuenta_venta: cuenta });
         if (errorVenta) return { error: errorVenta };
       }
     }
-    return supabase.from(tablaPagos).update({ aplicado: true }).eq('revendedor', nombre).eq('aplicado', false);
+    const { error } = await supabase.from(tablaPagos).update({ aplicado: true }).eq('revendedor', nombre).eq('aplicado', false);
+    if (error) return { error };
+
+    const entregadoUsd = pendientes.data.reduce((acc, p) => acc + (Number(p.monto_usd) || 0), 0);
+    const entregadoArs = pendientes.data.reduce((acc, p) => acc + (Number(p.monto_ars) || 0), 0);
+    const favorUsd = entregadoUsd - deudaUsd;
+    if (favorUsd < 0.005 || entregadoUsd <= 0) return { error: null, favorArs: 0 };
+    // Lo que sobra conserva los pesos que realmente entrego (proporcional a lo entregado),
+    // redondeado al peso para no arrastrar centavos de la conversion
+    const favorArs = Math.round(entregadoArs * (favorUsd / entregadoUsd));
+    const { error: errorFavor } = await supabase.from(tablaPagos).insert({
+      revendedor: nombre,
+      monto_ars: redondear(favorArs),
+      cotizacion: redondear(favorArs / favorUsd),
+      monto_usd: redondear(favorUsd),
+    });
+    if (errorFavor) {
+      return { error: { message: 'la cuenta se cerro, pero no se pudo guardar el saldo a favor de ARS $ ' + fmt(Math.round(favorArs)) + ' (' + errorFavor.message + ')' } };
+    }
+    return { error: null, favorArs };
   }
+
+  // Texto para agregar al aviso de cierre cuando le quedo plata a favor
+  const textoFavor = (resultado) =>
+    resultado && resultado.favorArs > 0 ? ' Le quedan ARS $ ' + fmt(Math.round(resultado.favorArs)) + ' a favor para lo proximo que lleve.' : '';
 
   async function registrarPagoCuenta(cuenta, nombre, montoArs) {
     return supabase.from(CUENTAS[cuenta].tablaPagos).insert({
@@ -1684,9 +1758,9 @@ function Admin() {
     }
 
     if (saldoCubierto(saldoFinalUsd)) {
-      const { error } = await cerrarCuenta(cuenta, nombre);
-      if (error) toast.error('No se pudo cerrar la cuenta: ' + error.message);
-      else toast.success('Pago completo: los equipos de ' + nombre + ' quedaron como vendidos');
+      const cierre = await cerrarCuenta(cuenta, nombre);
+      if (cierre.error) toast.error('No se pudo cerrar la cuenta: ' + cierre.error.message);
+      else toast.success('Pago completo: los equipos de ' + nombre + ' quedaron como vendidos.' + textoFavor(cierre), { duration: 6000 });
     } else {
       toast.success(unidadesCarrito + CUENTAS[cuenta].asignadas + nombre + '. Saldo: ARS $ ' + fmt(Math.round(saldoFinalUsd * cot)));
     }
@@ -1721,9 +1795,9 @@ function Admin() {
       return;
     }
     if (saldoCubierto(saldoFinal) && grupoPago.unidades > 0) {
-      const { error: errorCierre } = await cerrarCuenta(cuenta, nombre);
-      if (errorCierre) toast.error('El pago se guardo, pero no se pudo cerrar la cuenta: ' + errorCierre.message);
-      else toast.success('Saldo cubierto: los equipos de ' + nombre + ' quedaron como vendidos');
+      const cierre = await cerrarCuenta(cuenta, nombre);
+      if (cierre.error) toast.error('El pago se guardo, pero no se pudo cerrar la cuenta: ' + cierre.error.message);
+      else toast.success('Saldo cubierto: los equipos de ' + nombre + ' quedaron como vendidos.' + textoFavor(cierre), { duration: 6000 });
     } else {
       toast.success('Pago registrado. Saldo de ' + nombre + ': ARS $ ' + fmt(Math.round(saldoFinal * cot)));
     }
@@ -1769,9 +1843,9 @@ function Admin() {
       return;
     }
     if (grupo && saldoCubierto(saldoFinal) && grupo.unidades > 0) {
-      const { error: errorCierre } = await cerrarCuenta(cuenta, nombre);
-      if (errorCierre) toast.error('El pago se corrigio, pero no se pudo cerrar la cuenta: ' + errorCierre.message);
-      else toast.success('Saldo cubierto: los equipos de ' + nombre + ' quedaron como vendidos');
+      const cierre = await cerrarCuenta(cuenta, nombre);
+      if (cierre.error) toast.error('El pago se corrigio, pero no se pudo cerrar la cuenta: ' + cierre.error.message);
+      else toast.success('Saldo cubierto: los equipos de ' + nombre + ' quedaron como vendidos.' + textoFavor(cierre), { duration: 6000 });
     } else {
       toast.success('Pago corregido. Saldo de ' + nombre + ': ARS $ ' + fmt(Math.round(saldoFinal * cot)));
     }
@@ -1838,36 +1912,44 @@ function Admin() {
     setDialogo({
       titulo: 'Cerrar la cuenta de ' + g.nombre,
       texto:
-        g.unidades > 0
+        (g.unidades > 0
           ? 'Sus ' + g.unidades + ' unidad(es) pasan al historial de ventas al precio acordado y los pagos a cuenta se dan por aplicados.'
-          : 'No tiene equipos a su nombre. Los pagos a cuenta se dan por aplicados y la cuenta queda en cero.',
+          : 'No tiene equipos a su nombre. Los pagos a cuenta se dan por aplicados y la cuenta queda en cero.') +
+        (g.saldoUsd < -0.005
+          ? ' Lo que entrego de mas (ARS $ ' + fmt(Math.round(-g.saldoUsd * cot)) + ') le sigue quedando a favor.'
+          : ''),
       botones: [
         {
           etiqueta: 'Cerrar cuenta',
           clase: 'bg-green-600 hover:bg-green-700',
           accion: async () => {
-            const { error } = await cerrarCuenta(g.cuenta, g.nombre);
-            if (error) toast.error('No se pudo cerrar la cuenta: ' + error.message);
-            else toast.success('Cuenta de ' + g.nombre + ' cerrada');
+            const cierre = await cerrarCuenta(g.cuenta, g.nombre);
+            if (cierre.error) toast.error('No se pudo cerrar la cuenta: ' + cierre.error.message);
+            else toast.success('Cuenta de ' + g.nombre + ' cerrada.' + textoFavor(cierre), { duration: 6000 });
             cargarDatos(false);
           },
         },
       ],
     });
 
-  // El revendedor devuelve el equipo (o se cancela la sena): vuelve al stock con su precio de venta original
-  async function devolverRevendedor(ids, tabla) {
-    const { error } = await porTandas(ids, (tanda) =>
-      supabase
-        .from(tabla)
-        .update({ estado: 'disponible', revendedor: null, precio_revendedor: null, fecha_revendedor: null })
-        .in('id', tanda)
-    );
+  // El revendedor devuelve el equipo (o se cancela la sena): vuelve al stock. Si en el local
+  // quedan unidades de ese mismo lote, toma su costo y su precio actuales, para que al juntarse
+  // no cambie el promedio ni el precio de las demas. Si no queda ninguna, conserva los suyos.
+  async function devolverRevendedor(lote, ids) {
+    const { tabla } = lote;
+    const claveFn = tabla === 'celulares' ? claveCelular : claveAccesorio;
+    const enLocal = (tabla === 'celulares' ? stockCelulares : stockAccesorios).find((l) => claveFn(l) === claveFn(lote));
+    const datos = { estado: 'disponible', revendedor: null, precio_revendedor: null, fecha_revendedor: null };
+    if (enLocal) Object.assign(datos, { costo_usd: enLocal.costo_usd, precio_usd: enLocal.precio_usd });
+    const { error } = await porTandas(ids, (tanda) => supabase.from(tabla).update(datos).in('id', tanda));
     if (error) {
       toast.error('Error al actualizar: ' + error.message);
       return;
     }
-    toast.success(ids.length + ' unidad(es) devuelta(s) al stock');
+    toast.success(
+      ids.length + ' unidad(es) devuelta(s) al stock' +
+        (enLocal ? ' al precio del lote (ARS $ ' + fmt(Math.round(enLocal.precio_usd * cot)) + ')' : '')
+    );
     cargarDatos(false);
   }
 
@@ -1902,11 +1984,11 @@ function Admin() {
     setResolucion(null);
 
     if (destino !== 'vendido') {
-      await devolverRevendedor(ids, lote.tabla);
+      await devolverRevendedor(lote, ids);
       return;
     }
 
-    const { error } = await marcarVendido(lote.tabla, ids, { precio_usd: lote.precioUnidad });
+    const { error } = await marcarVendido(lote.tabla, ids, { precio_usd: lote.precioUnidad, cuenta_venta: lote.cuenta });
     if (error) {
       toast.error('Error al registrar el pago: ' + error.message);
       return;
@@ -1929,9 +2011,9 @@ function Admin() {
     const quedan = grupo ? grupo.unidades - ids.length : 0;
     const saldoNuevoUsd = grupo ? grupo.saldoUsd - (valorUsd - aplicadoUsd) : 0;
     if (quedan === 0 || saldoCubierto(saldoNuevoUsd)) {
-      const { error: errorCierre } = await cerrarCuenta(lote.cuenta, nombre);
-      if (errorCierre) toast.error('Se registro el pago, pero no se pudo cerrar la cuenta: ' + errorCierre.message);
-      else toast.success('Cuenta de ' + nombre + ' saldada: sus equipos quedaron como vendidos');
+      const cierre = await cerrarCuenta(lote.cuenta, nombre);
+      if (cierre.error) toast.error('Se registro el pago, pero no se pudo cerrar la cuenta: ' + cierre.error.message);
+      else toast.success('Cuenta de ' + nombre + ' saldada: sus equipos quedaron como vendidos.' + textoFavor(cierre), { duration: 6000 });
     } else {
       toast.success(
         ids.length + ' unidad(es) marcada(s) como pagada(s). Saldo de ' + nombre + ': ARS $ ' + fmt(Math.round(saldoNuevoUsd * cot))
@@ -1998,6 +2080,13 @@ function Admin() {
     }
     if (g.saldoUsd > 0.005) {
       aviso(g.nombre + ' todavia debe ARS $ ' + fmt(Math.round(g.saldoUsd * cot)) + '. Registra el pago antes de eliminarlo.');
+      return;
+    }
+    if (g.saldoUsd < -0.005) {
+      aviso(
+        g.nombre + ' tiene ARS $ ' + fmt(Math.round(-g.saldoUsd * cot)) +
+          ' a favor. Si se los devolviste, elimina ese pago desde su detalle antes de eliminarlo.'
+      );
       return;
     }
     if (tieneMovimientos(g)) {
@@ -2383,6 +2472,7 @@ function Admin() {
               Number(v.cotizacion_venta) || 0,
               Number(v.cotizacion_costo) || 0,
               permutaDe(v),
+              normalizar(v.revendedor),
             ].join('|');
       const grupo = grupos.get(clave);
       if (grupo) {
@@ -3232,6 +3322,11 @@ function Admin() {
                           {item.cantidad > 1 ? ' (USD ' + fmt(item.precioUnidadUsd) + ' c/u)' : ''}
                           {item.categoria === 'cobro' ? ' - ganancia estimada' : ''}
                         </div>
+                        {origenDeVenta(item) && (
+                          <div className="text-[11px] font-semibold text-purple-700">
+                            {textoOrigen(origenDeVenta(item))} (pagado de su cuenta)
+                          </div>
+                        )}
                         {permutaDe(item) > 0 && (
                           <div className="text-[11px] font-semibold text-purple-700">
                             Permuta: mas un equipo tomado en ARS $ {fmt(Math.round(permutaDe(item) * cotizacionDe(item)))}. Precio total ARS ${' '}
@@ -3571,15 +3666,15 @@ function Admin() {
             />
 
             <div className="mt-3 bg-gray-50 border border-gray-200 rounded-lg p-3 space-y-1 text-xs font-semibold text-gray-600">
-              {grupoCarrito && (
+              {grupoCarrito && Math.abs(saldoPrevioArs) >= 1 && (
                 <div className="flex justify-between gap-2">
-                  <span>Saldo que ya tenia {grupoCarrito.nombre}</span>
-                  <span>ARS $ {fmt(Math.round(saldoPrevioArs))}</span>
+                  <span>{saldoPrevioArs < 0 ? 'A favor de ' + grupoCarrito.nombre + ' (se descuenta)' : 'Saldo que ya tenia ' + grupoCarrito.nombre}</span>
+                  <span>{saldoPrevioArs < 0 ? '- ' : ''}ARS $ {fmt(Math.round(Math.abs(saldoPrevioArs)))}</span>
                 </div>
               )}
               <div className="flex justify-between gap-2 text-base font-black text-gray-900">
-                <span>Saldo pendiente</span>
-                <span>ARS $ {fmt(Math.round(saldoPrevioArs + totalCarritoArs - entregadoCarritoArs))}</span>
+                <span>{saldoCarritoFinalArs < -0.5 ? 'Le queda a favor' : 'Saldo pendiente'}</span>
+                <span>ARS $ {fmt(Math.round(Math.abs(saldoCarritoFinalArs)))}</span>
               </div>
               <p className="text-[11px] font-medium text-gray-500">
                 {textosCarrito.notaCarrito}
@@ -3654,7 +3749,8 @@ function Admin() {
               </div>
               <p className="text-[11px] font-medium text-gray-500 mt-1">
                 {saldoCubierto(saldoTrasPagoUsd) && grupoPago.unidades > 0
-                  ? 'Con este pago el saldo queda cubierto: sus equipos pasan al historial de ventas.'
+                  ? 'Con este pago el saldo queda cubierto: sus equipos pasan al historial de ventas' +
+                    (saldoTrasPagoUsd < -0.005 ? ' y lo que sobra le queda a favor.' : '.')
                   : 'El pago se guarda con la cotizacion de hoy.'}
               </p>
             </div>
@@ -3813,7 +3909,8 @@ function Admin() {
               </div>
               <p className="text-[11px] font-medium text-gray-500 mt-1">
                 {saldoCubierto(saldoTrasEdicionUsd) && grupoEdicionPago.unidades > 0
-                  ? 'Con este monto el saldo queda cubierto: sus equipos pasan al historial de ventas.'
+                  ? 'Con este monto el saldo queda cubierto: sus equipos pasan al historial de ventas' +
+                    (saldoTrasEdicionUsd < -0.005 ? ' y lo que sobra le queda a favor.' : '.')
                   : 'Se mantiene la cotizacion del dia del pago ($ ' + fmt(cotEdicionPago) + ').'}
               </p>
             </div>
@@ -4386,6 +4483,42 @@ function Admin() {
               </div>
             )}
 
+            {venta.tabla === 'accesorios' && (
+              <Fragment>
+                <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">Precio</label>
+                <select
+                  value={modoPrecioAcc}
+                  onChange={(e) => cambiarModoPrecioAcc(e.target.value)}
+                  aria-label="Precio de la venta"
+                  className={claseInputModal + ' text-gray-700'}
+                >
+                  <option value="lista">
+                    {(escalas[claveAccesorio(venta.item)] || []).length > 0 ? 'Lista / por cantidad' : 'Precio de lista'}
+                  </option>
+                  <option value="unidad">Precio especial por unidad</option>
+                  <option value="total">Precio especial por el total</option>
+                </select>
+                {modoPrecioAcc !== 'lista' && (
+                  <Fragment>
+                    <InputPesos
+                      value={venta.precioEspecial}
+                      onChange={(precioEspecial) => setVenta({ ...venta, precioEspecial })}
+                      placeholder={modoPrecioAcc === 'total' ? 'Total en pesos' : 'Pesos por unidad'}
+                      aria-label={modoPrecioAcc === 'total' ? 'Precio especial por el total, en pesos' : 'Precio especial por unidad, en pesos'}
+                      className={claseInputModal + ' font-bold mt-2'}
+                    />
+                    <p className="text-[11px] font-medium text-gray-500 mt-1">
+                      {modoPrecioAcc === 'total'
+                        ? 'Pesos por las ' + cantidadVenta + ' unidad(es) juntas.'
+                        : cantidadVenta > 1
+                        ? 'Se aplica a cada una de las ' + cantidadVenta + ' unidades.'
+                        : 'Pesos por la unidad.'}
+                    </p>
+                  </Fragment>
+                )}
+              </Fragment>
+            )}
+
             {venta.tabla === 'celulares' ? (
               <div className="mt-3 bg-green-50 border border-green-100 rounded-lg p-3">
                 <div className="flex justify-between gap-2 text-xs font-semibold text-gray-600">
@@ -4408,15 +4541,24 @@ function Admin() {
               </div>
             ) : (
               <div className="mt-3 bg-green-50 border border-green-100 rounded-lg p-3">
-                {escalaVenta && escalaVenta.tramo && redondear(escalaVenta.unitarioUsd) !== redondear(venta.item.precio_usd) && (
+                {redondear(precioVenta) !== redondear(venta.item.precio_usd) && (
                   <div className="flex justify-between gap-2 text-xs font-semibold text-gray-500">
                     <span>Precio de lista por unidad</span>
                     <span className="line-through">USD {fmt(venta.item.precio_usd)}</span>
                   </div>
                 )}
                 <div className="flex justify-between gap-2 text-xs font-semibold text-gray-600">
-                  <span>{escalaVenta && escalaVenta.tramo ? 'Precio por cantidad (por unidad)' : 'Precio por unidad'}</span>
-                  <span>USD {fmt(precioVenta)}</span>
+                  <span>
+                    {modoPrecioAcc !== 'lista'
+                      ? 'Precio especial (por unidad)'
+                      : escalaVenta && escalaVenta.tramo
+                      ? 'Precio por cantidad (por unidad)'
+                      : 'Precio por unidad'}
+                  </span>
+                  <span>
+                    USD {fmt(precioVenta)}
+                    {modoPrecioAcc !== 'lista' ? ' (ARS $ ' + fmt(Math.round(precioVenta * cot)) + ')' : ''}
+                  </span>
                 </div>
                 <div className="flex justify-between gap-2 mt-1 text-base font-black text-green-700">
                   <span>Total ({cantidadVenta} u.)</span>
