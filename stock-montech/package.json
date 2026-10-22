@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:prueba": "vite --mode prueba --port 5174",
+    "probar": "node --test \"pruebas/*.test.js\"",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"
