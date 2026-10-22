@@ -896,6 +896,7 @@ function Admin() {
   const [pagosRevendedor, setPagosRevendedor] = useState([]); // pagos a cuenta todavia no aplicados
   const [pagosSena, setPagosSena] = useState([]); // lo entregado por las senas, todavia no aplicado
   const [historialPagos, setHistorialPagos] = useState([]); // todos los pagos de las dos cuentas, con su cuenta
+  const [controlCajaAbierto, setControlCajaAbierto] = useState(false);
   const [pagoRevendedor, setPagoRevendedor] = useState(null); // { cuenta, nombre, monto (ARS) }
   const [edicionPago, setEdicionPago] = useState(null); // { cuenta, nombre, pago, monto (ARS) }
   const [edicionVenta, setEdicionVenta] = useState(null); // { item, precio (ARS por unidad) }
@@ -1892,6 +1893,71 @@ function Admin() {
     cambiarTab(cobro.cuenta === 'sena' ? 'senas' : 'revendedores');
   };
 
+  // ---------- Control de caja: pagos dados por usados que no pagaron ningun equipo ----------
+  // Son pagos de cuentas ya cerradas que suman en Ventas como plata que entro, pero ningun equipo
+  // vendido los explica (un pago cargado de mas, o un equipo que despues se anulo). Se pueden
+  // quitar de la caja (si esa plata no entro) o dejar a favor de esa persona (si entro de verdad).
+  const pesosPorDolar = (c) => (c.cobrado_usd > 0 ? c.cobrado_ars / c.cobrado_usd : cot);
+
+  async function quitarSinEquipo(c) {
+    const tabla = CUENTAS[c.cuenta].tablaPagos;
+    const usadoUsd = c.aplicado_usd;
+    const { error } =
+      usadoUsd < 0.005
+        ? await supabase.from(tabla).delete().eq('id', c.pago.id)
+        : await supabase
+            .from(tabla)
+            .update({ monto_usd: redondear(usadoUsd), monto_ars: redondear(usadoUsd * pesosPorDolar(c)) })
+            .eq('id', c.pago.id);
+    if (error) toast.error('No se pudo corregir el pago: ' + error.message);
+    else toast.success(usadoUsd < 0.005 ? 'Pago quitado de la caja' : 'Se dejo solo lo que pago equipos');
+    cargarDatos(false);
+  }
+
+  async function dejarAFavor(c) {
+    const tabla = CUENTAS[c.cuenta].tablaPagos;
+    const usadoUsd = c.aplicado_usd;
+    const sobraUsd = c.sin_equipo_usd;
+    let error;
+    if (usadoUsd < 0.005) {
+      ({ error } = await supabase.from(tabla).update({ aplicado: false }).eq('id', c.pago.id));
+    } else {
+      // La parte usada queda como estaba; lo que sobra pasa a un pago aparte, del mismo dia, a su favor
+      ({ error } = await supabase
+        .from(tabla)
+        .update({ monto_usd: redondear(usadoUsd), monto_ars: redondear(usadoUsd * pesosPorDolar(c)) })
+        .eq('id', c.pago.id));
+      if (!error) {
+        ({ error } = await supabase.from(tabla).insert({
+          revendedor: c.pago.revendedor,
+          monto_usd: redondear(sobraUsd),
+          monto_ars: redondear(sobraUsd * pesosPorDolar(c)),
+          cotizacion: c.pago.cotizacion,
+          fecha: c.pago.fecha,
+          aplicado: false,
+        }));
+      }
+    }
+    if (error) toast.error('No se pudo dejar a su favor: ' + error.message);
+    else toast.success('ARS $ ' + fmt(Math.round(sobraUsd * pesosPorDolar(c))) + ' quedaron a favor de ' + c.revendedor);
+    cargarDatos(false);
+  }
+
+  const revisarSinEquipo = (c) => {
+    const sobraArs = Math.round(c.sin_equipo_usd * pesosPorDolar(c));
+    setDialogo({
+      titulo: 'Pago de ' + c.revendedor + ' del ' + fechaCorta(c.fecha_venta),
+      texto:
+        'Se cargo un pago de ARS $ ' + fmt(Math.round(c.cobrado_ars)) + ' y la cuenta se cerro, pero ARS $ ' + fmt(sobraArs) +
+        ' no pagaron ningun equipo vendido. Hoy suman en Ventas como plata que entro. Si esa plata no entro (por ejemplo, un pago cargado de mas), quitala. ' +
+        'Si entro de verdad, dejala a su favor: se descuenta de lo proximo que lleve.',
+      botones: [
+        { etiqueta: 'No entro: quitar ARS $ ' + fmt(sobraArs), clase: 'bg-red-600 hover:bg-red-700', accion: () => quitarSinEquipo(c) },
+        { etiqueta: 'Entro: dejarla a su favor', clase: 'bg-gray-700 hover:bg-gray-800', accion: () => dejarAFavor(c) },
+      ],
+    });
+  };
+
   // ---------- Corregir el precio de una venta ya registrada ----------
   const abrirEdicionVenta = (item) =>
     setEdicionVenta({ item, precio: Math.round(item.precioUnidadUsd * cotizacionDe(item)) });
@@ -2460,6 +2526,35 @@ function Admin() {
   const gananciaVentasARS = ventasFiltradas.reduce((acc, item) => acc + item.ganancia_usd * cotizacionDe(item), 0);
   // Equipos de una cuenta pagados (todo o en parte) con plata que ya se habia contado antes
   const hayVentasCubiertas = ventasFiltradas.some((v) => v.cubierto_usd > 0.005);
+
+  // Control de caja: de donde salio la plata del periodo elegido, dia por dia, y lo que conviene revisar
+  const desgloseCaja = [
+    { nombre: 'Ventas en el local', ars: 0 },
+    { nombre: 'Pagos de revendedores', ars: 0 },
+    { nombre: 'Pagos de señas', ars: 0 },
+    { nombre: 'Lo que faltaba al marcar equipos pagados', ars: 0 },
+  ];
+  ventasFiltradas.forEach((v) => {
+    const i = v.categoria === 'cobro' ? (v.cuenta === 'sena' ? 2 : 1) : v.cuenta_origen ? 3 : 0;
+    desgloseCaja[i].ars += v.cobrado_ars;
+  });
+  const cajaPorDia = (() => {
+    const dias = new Map();
+    ventasFiltradas.forEach((v) => {
+      if (!v.fecha_venta) return;
+      const f = new Date(v.fecha_venta);
+      const clave = f.getFullYear() + '-' + String(f.getMonth() + 1).padStart(2, '0') + '-' + String(f.getDate()).padStart(2, '0');
+      const dia = dias.get(clave) || { clave, texto: f.toLocaleDateString('es-AR'), ars: 0, movimientos: 0 };
+      dia.ars += v.cobrado_ars;
+      dia.movimientos += 1;
+      dias.set(clave, dia);
+    });
+    return [...dias.values()].sort((a, b) => (a.clave < b.clave ? 1 : -1));
+  })();
+  const pagosSinEquipo = ventasFiltradas.filter((v) => v.categoria === 'cobro' && v.sin_equipo_usd > 0.005);
+  const totalSinEquipoArs = pagosSinEquipo.reduce((acc, c) => acc + c.sin_equipo_usd * pesosPorDolar(c), 0);
+  // Ventas anteriores a que se guardara la cotizacion del dia: se pasan a pesos con la de hoy
+  const ventasSinCotizacion = ventasFiltradas.filter((v) => v.categoria !== 'cobro' && !(Number(v.cotizacion_venta) > 0));
   // Hay ventas cuyo costo se paso a pesos con una cotizacion distinta de la de venta
   const hayCotizacionCosto = ventasFiltradas.some((v) => cotizacionCostoDe(v) !== cotizacionDe(v));
 
@@ -3253,6 +3348,101 @@ function Admin() {
             </div>
           )}
 
+          {/* CONTROL DE CAJA: para comparar con otra aplicacion dia por dia y corregir lo que sobra */}
+          {ventasFiltradas.length > 0 && (
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setControlCajaAbierto(!controlCajaAbierto)}
+                aria-expanded={controlCajaAbierto}
+                className="w-full px-4 py-3 flex items-center gap-3 text-left hover:bg-gray-50 transition"
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-bold text-gray-800">
+                    Control de caja - {mesSeleccionado === 'todos' ? 'Historico total' : formatearNombreMes(mesSeleccionado)}
+                  </span>
+                  <span className="block text-[11px] font-semibold text-gray-500">
+                    De donde salio la plata, dia por dia, para comparar con lo que anotaste
+                  </span>
+                </span>
+                {pagosSinEquipo.length > 0 && (
+                  <span className="shrink-0 px-2 py-0.5 rounded border border-red-200 bg-red-50 text-red-700 text-[11px] font-bold">
+                    {pagosSinEquipo.length} para revisar
+                  </span>
+                )}
+                <IconoFlecha abierto={controlCajaAbierto} />
+              </button>
+              {controlCajaAbierto && (
+                <div className="border-t border-gray-200 p-4 space-y-4">
+                  <div>
+                    <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">De donde salio</p>
+                    <ul className="divide-y divide-gray-100 text-sm">
+                      {desgloseCaja.map((d) => (
+                        <li key={d.nombre} className="py-1.5 flex justify-between gap-3">
+                          <span className="font-semibold text-gray-600">{d.nombre}</span>
+                          <span className="font-bold text-gray-900 whitespace-nowrap">ARS $ {fmt(Math.round(d.ars))}</span>
+                        </li>
+                      ))}
+                      <li className="py-1.5 flex justify-between gap-3 text-base">
+                        <span className="font-black text-gray-900">Total que entro</span>
+                        <span className="font-black text-gray-900 whitespace-nowrap">ARS $ {fmt(Math.round(cobradoVentasARS))}</span>
+                      </li>
+                    </ul>
+                  </div>
+
+                  {pagosSinEquipo.length > 0 && (
+                    <div className="rounded-lg border border-red-200 bg-red-50 p-3">
+                      <p className="text-sm font-bold text-red-800">
+                        Para revisar: ARS $ {fmt(Math.round(totalSinEquipoArs))} en pagos que no pagaron ningun equipo
+                      </p>
+                      <p className="text-[11px] font-medium text-red-700 mt-0.5">
+                        Son pagos de cuentas ya cerradas que suman como plata que entro, pero ningun equipo vendido los explica: un pago cargado
+                        de mas, o un equipo que despues se anulo. Toca cada uno para quitarlo o dejarlo a favor de esa persona.
+                      </p>
+                      <ul className="mt-2 divide-y divide-red-100">
+                        {pagosSinEquipo.map((c) => (
+                          <li key={c.id} className="py-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs">
+                            <span className="font-semibold text-gray-700">
+                              {fechaCorta(c.fecha_venta)} - {c.revendedor} ({c.cuenta === 'sena' ? 'seña' : 'revendedor'}): pago de ARS ${' '}
+                              {fmt(Math.round(c.cobrado_ars))}
+                            </span>
+                            <button type="button" onClick={() => revisarSinEquipo(c)} className="font-bold text-red-700 hover:underline py-1">
+                              Sobran ARS $ {fmt(Math.round(c.sin_equipo_usd * pesosPorDolar(c)))} - Revisar
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {ventasSinCotizacion.length > 0 && (
+                    <p className="text-[11px] font-medium text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                      {ventasSinCotizacion.length} venta(s) son de antes de que se guardara la cotizacion de cada dia: se pasan a pesos con la
+                      cotizacion de hoy ($ {fmt(cot)}), asi que pueden no coincidir con lo que cobraste en ese momento.
+                    </p>
+                  )}
+
+                  <div>
+                    <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">Dia por dia</p>
+                    <ul className="divide-y divide-gray-100 text-sm max-h-80 overflow-y-auto">
+                      {cajaPorDia.map((d) => (
+                        <li key={d.clave} className="py-1.5 flex justify-between gap-3">
+                          <span className="font-semibold text-gray-600">
+                            {d.texto} <span className="text-[11px] font-medium text-gray-400">({d.movimientos} mov.)</span>
+                          </span>
+                          <span className="font-bold text-gray-900 whitespace-nowrap">ARS $ {fmt(Math.round(d.ars))}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="text-[10px] text-gray-400 mt-1">
+                      Si un dia no coincide con lo que anotaste, toca ese mes arriba y busca los movimientos de ese dia en el historial.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
             {datosGrafico.length > 0 && (
               <div className="min-w-0 bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200">
@@ -3361,7 +3551,10 @@ function Admin() {
                         )}
                         {item.categoria === 'cobro' && (
                           <div className="text-[11px] font-semibold text-gray-500">
-                            {item.pendiente_usd < 0.005
+                            {item.sin_equipo_usd > 0.005
+                              ? 'La cuenta se cerro, pero ARS $ ' + fmt(Math.round(item.sin_equipo_usd * pesosPorDolar(item))) +
+                                ' no pagaron ningun equipo: revisalo en Control de caja'
+                              : item.pendiente_usd < 0.005
                               ? 'Usado para pagar equipos ya vendidos'
                               : item.aplicado_usd > 0.005
                               ? 'Una parte pago equipos ya vendidos; quedan USD ' + fmt(item.pendiente_usd) + ' sin usar'

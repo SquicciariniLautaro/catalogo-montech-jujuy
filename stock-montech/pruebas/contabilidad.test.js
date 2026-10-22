@@ -104,6 +104,7 @@ test('saldo a favor que la version anterior volvia a anotar como pago: no se cue
   const movs = contar(ventas, pagos);
   cerca(totalArs(movs), 1000000, 'entraron 600 mil + 400 mil');
   assert.equal(movs.filter((m) => m.categoria === 'cobro').length, 2, 'el pago reescrito no aparece');
+  cerca(movs.find((m) => m.id === 'pago-revendedor-1').sin_equipo_usd, 0, 'lo que sobro ya esta a su favor: no hay que revisarlo');
   cerca(gananciaUsd(movs), usd(200000), 'ganancia de los dos equipos');
 });
 
@@ -134,4 +135,37 @@ test('seña y revendedor con el mismo nombre no se mezclan', () => {
   const ventas = [venta(10, 500000, 400000, '2026-10-02T12:00:00Z', deCuenta)];
   const movs = contar(ventas, pagos);
   cerca(totalArs(movs), 800000, 'la seña no paga el equipo del revendedor');
+});
+
+test('pago dado por usado sin ningun equipo vendido: cuenta como plata y queda marcado para revisar', () => {
+  // Pago cargado de mas por error en una cuenta que despues se cerro (aplicado), o cuyo equipo se anulo
+  const pagos = [pago(1, 2000000, '2026-10-03T12:00:00Z', { aplicado: true }), pago(2, 300000, '2026-10-04T12:00:00Z')];
+  const ventas = [venta(10, 500000, 400000, '2026-10-03T12:00:01Z', deCuenta)];
+  const movs = contar(ventas, pagos);
+  const malo = movs.find((m) => m.id === 'pago-revendedor-1');
+  cerca(malo.sin_equipo_usd, usd(1500000), 'lo que sobra del pago');
+  assert.equal(malo.estimada, false, 'sin ganancia estimada: la cuenta ya se cerro');
+  cerca(movs.find((m) => m.id === 'pago-revendedor-2').sin_equipo_usd, 0, 'un pago sin usar de una cuenta abierta no se marca');
+  assert.equal(movs.find((m) => m.id === 10).cuenta_origen, 'revendedor');
+});
+
+test('saldo a favor reescrito que todavia no se uso: no se marca para revisar', () => {
+  const pagos = [
+    pago(1, 600000, '2026-10-15T12:00:00Z', { aplicado: true }),
+    pago(2, 100000, '2026-10-15T12:00:02Z'), // lo que sobro, reescrito por la version anterior
+  ];
+  const movs = contar([venta(10, 500000, 400000, '2026-10-15T12:00:01Z', deCuenta)], pagos);
+  cerca(totalArs(movs), 600000, 'entraron 600 mil');
+  cerca(movs.find((m) => m.id === 'pago-revendedor-1').sin_equipo_usd, 0, 'no hay nada que revisar');
+});
+
+test('pago corregido con "dejar a su favor": la plata que entro no cambia', () => {
+  // El pago de 1.500.000 se partio en 500 mil (pago el equipo) y 1.000.000 a su favor, del mismo dia
+  const pagos = [
+    pago(1, 500000, '2026-10-08T12:00:00Z', { aplicado: true }),
+    pago(2, 1000000, '2026-10-08T12:00:00Z'),
+  ];
+  const movs = contar([venta(10, 500000, 400000, '2026-10-08T12:00:01Z', deCuenta)], pagos);
+  cerca(totalArs(movs), 1500000, 'siguen contando los 1.500.000');
+  cerca(movs.find((m) => m.id === 10).cobrado_ars, 0, 'el equipo se pago con el pago de 500 mil');
 });
