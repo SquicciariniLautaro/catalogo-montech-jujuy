@@ -37,6 +37,13 @@ const tablas = {
       fecha_venta: masSegundos(dia(16), 1), cotizacion_venta: COT, cuenta_venta: 'revendedor', revendedor: 'Martin',
       precio_revendedor: usd(500000), fecha_revendedor: dia(12),
     }),
+    // Pedro: se llevo un equipo de 500 mil y se cargo por error un pago de 1.500.000 que cerro la cuenta
+    celular(10, '12', 'vendido', {
+      fecha_venta: masSegundos(dia(8), 1), cotizacion_venta: COT, cuenta_venta: 'revendedor', revendedor: 'Pedro',
+      precio_revendedor: usd(500000), fecha_revendedor: dia(6),
+    }),
+    // Venta de antes de que se guardara la cotizacion del dia
+    celular(11, '11', 'vendido', { fecha_venta: dia(1), precio_usd: usd(300000) }),
     // Seña de Lucia: dejo 200 mil
     celular(9, '14', 'senado', { revendedor: 'Lucia', precio_revendedor: usd(700000), fecha_revendedor: dia(18), costo_usd: usd(550000) }),
   ],
@@ -50,6 +57,7 @@ const tablas = {
     pago(3, 'Juan', 300000, dia(12)),
     pago(4, 'Martin', 600000, dia(16), true),
     pago(5, 'Martin', 100000, masSegundos(dia(16), 2)), // lo que sobro, anotado como pago nuevo
+    pago(6, 'Pedro', 1500000, dia(8), true), // cargado de mas
   ],
   pagos_sena: [pago(1, 'Lucia', 200000, dia(18))],
   escalas_precio: [],
@@ -57,6 +65,7 @@ const tablas = {
     { id: 1, nombre: 'Federico', clave: 'FEDERICO', celular: null },
     { id: 2, nombre: 'Juan', clave: 'JUAN', celular: null },
     { id: 3, nombre: 'Martin', clave: 'MARTIN', celular: null },
+    { id: 4, nombre: 'Pedro', clave: 'PEDRO', celular: null },
   ],
   catalogo_config: [],
 };

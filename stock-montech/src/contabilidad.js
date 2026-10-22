@@ -36,9 +36,12 @@ const tiempo = (iso) => {
 // margenPendiente(cuenta, clave): margen para estimar la ganancia de lo entregado sin usar.
 //
 // Devuelve las ventas con cobrado_usd, cobrado_ars, ganancia_usd (lo que cuenta ese dia),
-// cubierto_usd y cubierto_ars (lo pagado con entregas anteriores) y ganancia_total_usd; y un
-// movimiento 'cobro' por cada pago real, con cobrado_usd, cobrado_ars, ganancia_usd,
-// aplicado_usd (la parte ya usada en equipos vendidos) y pendiente_usd.
+// cubierto_usd y cubierto_ars (lo pagado con entregas anteriores), ganancia_total_usd y
+// cuenta_origen (la cuenta de la que salio, o null); y un movimiento 'cobro' por cada pago real,
+// con cobrado_usd, cobrado_ars, ganancia_usd, aplicado_usd (la parte ya usada en equipos
+// vendidos), pendiente_usd y sin_equipo_usd: la parte que la base da por usada pero que no pago
+// ningun equipo vendido. Esa plata cuenta como entrada y conviene revisarla: puede ser un pago
+// cargado de mas o un equipo que despues se anulo.
 export function contabilizar({ ventas, pagos, cuentaDeVenta, claveNombre, gananciaDe, cotizacionDe, margenPendiente }) {
   const movimientos = [];
   const porCuenta = new Map();
@@ -58,9 +61,10 @@ export function contabilizar({ ventas, pagos, cuentaDeVenta, claveNombre, gananc
       cubierto_ars: 0,
       ganancia_total_usd: ganancia,
       ganancia_usd: ganancia,
+      cuenta_origen: cuentaDeVenta(v),
     };
     movimientos.push(mov);
-    const cuenta = cuentaDeVenta(v);
+    const cuenta = mov.cuenta_origen;
     if (cuenta) eventosDe(cuenta, v.revendedor).push({ tipo: 'venta', t: tiempo(v.fecha_venta), mov, valor, falta: valor });
   });
 
@@ -102,15 +106,17 @@ export function contabilizar({ ventas, pagos, cuentaDeVenta, claveNombre, gananc
 
       // La version anterior, al cerrar una cuenta con plata de mas, daba por usados todos los
       // pagos y anotaba lo que sobraba como un pago nuevo. Ese pago no es plata nueva: es lo
-      // mismo que ya se habia entregado, y se reconoce porque es exactamente lo que sobra.
+      // mismo que ya se habia entregado, y se reconoce porque se anoto despues de la venta de los
+      // equipos (los pagos reales se anotan antes) y es exactamente lo que sobra.
       let reescrito = null;
       if (ventasOp.length > 0) {
         const totalPagos = pagosOp.reduce((acc, e) => acc + e.usd, 0);
         const totalVentas = ventasOp.reduce((acc, e) => acc + e.valor, 0);
+        const ultimaVenta = Math.max(...ventasOp.map((e) => e.t));
         reescrito =
           pagosOp.find((e) => {
             const sobra = disponible() + totalPagos - e.usd - totalVentas;
-            return sobra >= CENTAVO && Math.abs(sobra - e.usd) < 0.01;
+            return e.t > ultimaVenta && sobra >= CENTAVO && Math.abs(sobra - e.usd) < 0.01;
           }) || null;
       }
 
@@ -128,6 +134,7 @@ export function contabilizar({ ventas, pagos, cuentaDeVenta, claveNombre, gananc
           cobrado_ars: e.ars,
           aplicado_usd: 0,
           pendiente_usd: 0,
+          sin_equipo_usd: 0,
           ganancia_usd: 0,
           estimada: false,
         };
@@ -144,14 +151,23 @@ export function contabilizar({ ventas, pagos, cuentaDeVenta, claveNombre, gananc
           if (parte.usd < CENTAVO) credito.shift();
         }
       });
+
+      // Lo que sobro en esa operacion es el saldo a favor que la version anterior reescribio: esa
+      // plata sigue viva en el pago reescrito, asi que no hay nada que revisar
+      if (reescrito) credito.forEach((parte) => (parte.aFavor = true));
     });
 
-    // Lo entregado que todavia no pago ningun equipo: ganancia estimada
+    // Lo entregado que todavia no pago ningun equipo: ganancia estimada. Si la base ya lo da por
+    // usado (la cuenta se cerro), no hay equipo que lo explique: queda marcado para revisar.
     const margen = credito.length > 0 ? margenPendiente(cuenta, clave) || 0 : 0;
-    credito.forEach(({ cobro, usd }) => {
+    credito.forEach(({ cobro, usd, aFavor }) => {
       cobro.pendiente_usd += usd;
-      cobro.ganancia_usd += usd * margen;
-      cobro.estimada = true;
+      if (aFavor) return;
+      if (cobro.pago.aplicado) cobro.sin_equipo_usd += usd;
+      else {
+        cobro.ganancia_usd += usd * margen;
+        cobro.estimada = true;
+      }
     });
   });
 
