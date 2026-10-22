@@ -9,6 +9,15 @@
         "dev"
       ],
       "port": 5173
+    },
+    {
+      "name": "web-prueba",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev:prueba"
+      ],
+      "port": 5174
     }
   ]
 }

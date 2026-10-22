@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, Fragment } from 'react';
 import { supabase } from './supabase';
 import toast from 'react-hot-toast';
 import FirmaLambda from './FirmaLambda';
+import { contabilizar } from './contabilidad';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 
 const COLORES = [
@@ -335,7 +336,7 @@ const CUENTAS = {
     preguntaDevolucion: 'Cuantas unidades devolvio?',
     notaDevolucion: 'Vuelve al stock disponible al precio actual de su lote, sin cambiar el precio de las demas unidades.',
     cobro: 'cobro a cuenta',
-    cobroCsv: 'Cobro a cuenta (estimado)',
+    cobroCsv: 'Cobro a cuenta',
   },
   sena: {
     estado: 'senado',
@@ -364,7 +365,7 @@ const CUENTAS = {
     preguntaDevolucion: 'Cuantas unidades se cancelan?',
     notaDevolucion: 'Vuelve al stock disponible y al catalogo publico, al precio actual de su lote. Lo que ya entrego queda a su favor (si se lo devolviste, elimina ese pago desde su detalle).',
     cobro: 'seña',
-    cobroCsv: 'Seña (estimado)',
+    cobroCsv: 'Seña',
   },
 };
 
@@ -894,6 +895,7 @@ function Admin() {
   const [carritoEntregado, setCarritoEntregado] = useState('');
   const [pagosRevendedor, setPagosRevendedor] = useState([]); // pagos a cuenta todavia no aplicados
   const [pagosSena, setPagosSena] = useState([]); // lo entregado por las senas, todavia no aplicado
+  const [historialPagos, setHistorialPagos] = useState([]); // todos los pagos de las dos cuentas, con su cuenta
   const [pagoRevendedor, setPagoRevendedor] = useState(null); // { cuenta, nombre, monto (ARS) }
   const [edicionPago, setEdicionPago] = useState(null); // { cuenta, nombre, pago, monto (ARS) }
   const [edicionVenta, setEdicionVenta] = useState(null); // { item, precio (ARS por unidad) }
@@ -941,8 +943,6 @@ function Admin() {
   };
   const textoOrigen = (o) =>
     o.cuenta === 'revendedor' ? 'Revendedor: ' + o.nombre : o.cuenta === 'sena' ? 'Seña de ' + o.nombre : 'Cuenta de ' + o.nombre;
-  // Lo que entro en plata por una venta: el precio menos el equipo recibido en permuta
-  const cobradoDe = (v) => (Number(v.precio_usd) || 0) - permutaDe(v);
 
   // Marca unidades como vendidas y guarda las cotizaciones del dia (venta y costo), para que el
   // historial en pesos y la ganancia no cambien cuando se mueve el dolar. En celulares guarda
@@ -1053,14 +1053,21 @@ function Admin() {
     ventasUnificadas.sort((a, b) => new Date(b.fecha_venta) - new Date(a.fecha_venta));
     setVentasGlobales(ventasUnificadas);
 
-    const pagos = await traerTodo(() =>
-      supabase.from('pagos_revendedor').select('*').eq('aplicado', false).order('fecha')
-    );
-    setPagosRevendedor(pagos.error ? [] : pagos.data);
+    // Se traen todos los pagos, tambien los ya aplicados: en Ventas cada pago cuenta el dia en que
+    // entro la plata, aunque despues se haya usado para pagar equipos
+    const todosRevendedor = await traerTodo(() => supabase.from('pagos_revendedor').select('*').order('fecha').order('id'));
+    if (todosRevendedor.error) toast.error('Error al cargar los pagos de revendedores: ' + todosRevendedor.error.message);
+    const pagos = { error: todosRevendedor.error, data: (todosRevendedor.data || []).filter((p) => !p.aplicado) };
+    setPagosRevendedor(pagos.data);
 
     // Pagos de las senas (tabla opcional: si falta, se toma como vacia)
-    const pagosDeSenas = await traerTodo(() => supabase.from('pagos_sena').select('*').eq('aplicado', false).order('fecha'));
-    setPagosSena(pagosDeSenas.error ? [] : pagosDeSenas.data);
+    const todosSena = await traerTodo(() => supabase.from('pagos_sena').select('*').order('fecha').order('id'));
+    const pagosDeSenas = todosSena.error ? [] : todosSena.data;
+    setPagosSena(pagosDeSenas.filter((p) => !p.aplicado));
+    setHistorialPagos([
+      ...(todosRevendedor.data || []).map((p) => ({ ...p, cuenta: 'revendedor' })),
+      ...pagosDeSenas.map((p) => ({ ...p, cuenta: 'sena' })),
+    ]);
 
     // Precios por cantidad de los accesorios (tabla opcional: si falta, se vende a precio de lista)
     const esc = await traerTodo(() => supabase.from('escalas_precio').select('*').order('desde'));
@@ -1141,14 +1148,21 @@ function Admin() {
   // ---------- CSV ----------
   const escaparCsv = (valor) => '"' + String(valor === null || valor === undefined ? '' : valor).replace(/"/g, '""') + '"';
 
+  // "Cobrado" es la plata que entro ese dia: sumando esa columna da lo mismo que la pestana Ventas.
+  // En un equipo de una cuenta, lo que ya se habia cobrado antes va aparte y no se vuelve a sumar.
   const exportarCSV = () => {
-    let csv = '﻿Categoria,Producto,Color,Fecha Venta,Cantidad,Costo USD,Venta USD,Recibido en permuta USD,Cobrado USD,Ganancia USD,Cotizacion,Cobrado ARS,Cotizacion costo,Revendedor o seña\n';
+    let csv = '﻿Categoria,Producto,Color,Fecha,Cantidad,Costo USD,Venta USD,Recibido en permuta USD,Ya cobrado antes a cuenta USD,Cobrado USD,Ganancia USD,Cotizacion,Cobrado ARS,Cotizacion costo,Revendedor o seña\n';
     ventasAgrupadas.forEach((v) => {
       const fecha = v.fecha_venta ? new Date(v.fecha_venta).toLocaleDateString('es-AR') : 'Sin fecha';
-      const ganancia = gananciaDe(v).toFixed(2);
-      const cat = v.categoria === 'celular' ? 'Celular' : v.categoria === 'cobro' ? CUENTAS[v.cuenta].cobroCsv : 'Accesorio';
-      const producto = v.categoria === 'celular' ? v.modelo + ' ' + v.capacidad : v.categoria === 'cobro' ? v.revendedor : v.tipo + ' ' + v.modelo;
-      csv += [escaparCsv(cat), escaparCsv(producto), escaparCsv(v.color), escaparCsv(fecha), v.cantidad, redondear(v.costo_usd), redondear(v.precio_usd), redondear(permutaDe(v)), redondear(cobradoDe(v)), ganancia, cotizacionDe(v), Math.round(cobradoDe(v) * cotizacionDe(v)), cotizacionCostoDe(v), escaparCsv(origenDeVenta(v) ? textoOrigen(origenDeVenta(v)) : '')].join(',') + '\n';
+      const esCobro = v.categoria === 'cobro';
+      const cat = v.categoria === 'celular' ? 'Celular' : esCobro ? CUENTAS[v.cuenta].cobroCsv : 'Accesorio';
+      const producto = v.categoria === 'celular' ? v.modelo + ' ' + v.capacidad : esCobro ? v.revendedor : v.tipo + ' ' + v.modelo;
+      csv += [
+        escaparCsv(cat), escaparCsv(producto), escaparCsv(v.color), escaparCsv(fecha), v.cantidad,
+        esCobro ? '' : redondear(v.costo_usd), esCobro ? redondear(v.cobrado_usd) : redondear(v.precio_usd), redondear(permutaDe(v)),
+        esCobro ? 0 : redondear(v.cubierto_usd), redondear(v.cobrado_usd), v.ganancia_usd.toFixed(2), redondear(cotizacionDe(v)),
+        Math.round(v.cobrado_ars), esCobro ? '' : cotizacionCostoDe(v), escaparCsv(origenDeVenta(v) ? textoOrigen(origenDeVenta(v)) : ''),
+      ].join(',') + '\n';
     });
 
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -1526,48 +1540,31 @@ function Admin() {
   const gruposSena = armarGrupos('sena', enSena, pagosSena, []);
   const gruposDe = (cuenta) => (cuenta === 'sena' ? gruposSena : gruposRevendedor);
 
-  // Cobros a cuenta de los revendedores y de las senas, para sumarlos a los ingresos y a la ganancia de la
-  // pestana Ventas apenas se cobran. Cada cobro se trata como una venta parcial: ingreso = lo
-  // cobrado y ganancia = lo cobrado x margen de los equipos de esa cuenta (estimada).
-  // Lo que ya se aplico a equipos pagados (filas negativas) se descuenta de los cobros mas viejos,
-  // porque esos equipos ya figuran como ventas reales: asi no se cuenta dos veces.
-  const estimarCobros = (cuenta, pagos) => {
-    const porRevendedor = {};
-    pagos.forEach((p) => {
-      const k = normalizar(String(p.revendedor || '').trim() || 'Sin nombre');
-      (porRevendedor[k] = porRevendedor[k] || []).push(p);
-    });
-    const eventos = [];
-    Object.entries(porRevendedor).forEach(([k, filas]) => {
-      const g = gruposDe(cuenta).find((x) => normalizar(x.nombre) === k);
-      const margen = g ? g.margen : 0;
-      let aDescontarUsd = filas.reduce((acc, p) => acc + (Number(p.monto_usd) < 0 ? -Number(p.monto_usd) : 0), 0);
-      filas
-        .filter((p) => Number(p.monto_usd) > 0)
-        .sort((a, b) => new Date(a.fecha) - new Date(b.fecha))
-        .forEach((p) => {
-          const usd = Number(p.monto_usd);
-          const ars = Number(p.monto_ars) || 0;
-          const quita = Math.min(usd, aDescontarUsd);
-          aDescontarUsd -= quita;
-          const restoUsd = usd - quita;
-          if (restoUsd < 0.005) return;
-          const restoArs = ars * (restoUsd / usd);
-          eventos.push({
-            id: p.id,
-            categoria: 'cobro',
-            cuenta,
-            revendedor: g ? g.nombre : String(p.revendedor || '').trim(),
-            fecha_venta: p.fecha,
-            precio_usd: restoUsd,
-            costo_usd: restoUsd * (1 - margen),
-            cotizacion_venta: restoArs / restoUsd,
-          });
-        });
-    });
-    return eventos;
+  // Pestana Ventas: cada peso cuenta una sola vez, el dia en que entro (ver contabilidad.js).
+  // Los pagos a cuenta de revendedores y senas suman el dia del pago; el equipo que despues se
+  // paga con esa plata suma solo lo que faltaba. La ganancia acompana a la plata.
+  const claveNombre = (nombre) => normalizar(String(nombre || '').trim() || 'Sin nombre');
+  // Ventas anteriores a que se guardara la cuenta: si no estan en la lista de revendedores pero
+  // esa persona tiene pagos de sena, salieron de una sena
+  const cuentaDeVenta = (v) => {
+    const origen = origenDeVenta(v);
+    if (!origen) return null;
+    if (origen.cuenta) return origen.cuenta;
+    const clave = claveNombre(origen.nombre);
+    return historialPagos.some((p) => p.cuenta === 'sena' && claveNombre(p.revendedor) === clave) ? 'sena' : 'revendedor';
   };
-  const cobrosEstimados = [...estimarCobros('revendedor', pagosRevendedor), ...estimarCobros('sena', pagosSena)];
+  const movimientosGlobales = contabilizar({
+    ventas: ventasGlobales,
+    pagos: historialPagos,
+    cuentaDeVenta,
+    claveNombre,
+    gananciaDe,
+    cotizacionDe,
+    margenPendiente: (cuenta, clave) => {
+      const g = gruposDe(cuenta).find((x) => claveNombre(x.nombre) === clave);
+      return g ? g.margen : 0;
+    },
+  }).sort((a, b) => new Date(b.fecha_venta || 0) - new Date(a.fecha_venta || 0));
 
   // Saldo menor a medio centavo de dolar se considera cubierto
   const saldoCubierto = (saldoUsd) => saldoUsd < 0.005;
@@ -1644,16 +1641,21 @@ function Admin() {
     setCarrito(carrito.map((c) => (c.id === item.id && c.tabla === item.tabla ? { ...c, ...cambios } : c)));
   const quitarDelCarrito = (item) => setCarrito(carrito.filter((c) => !(c.id === item.id && c.tabla === item.tabla)));
 
-  // Marca como vendidas todas las unidades de una cuenta (al precio acordado de cada una)
-  // y da por aplicados sus pagos a cuenta. Si entrego mas de lo que debia, lo que sobra queda
-  // como un pago nuevo a su favor, que se descuenta de lo proximo que lleve. Lee la base para
-  // no depender de datos viejos. Devuelve cuanto le quedo a favor (en pesos).
+  // Marca como vendidas todas las unidades de una cuenta (al precio acordado de cada una) y usa
+  // sus pagos a cuenta para pagarlas. Lee la base para no depender de datos viejos. Devuelve
+  // cuanto le quedo a favor (en pesos).
+  // Si entrego justo lo que debia, sus pagos quedan aplicados y la cuenta en cero. Si entrego de
+  // mas, sus pagos siguen a la vista y una fila negativa anota lo que se uso en los equipos: lo
+  // que sobra queda a su favor y se descuenta de lo proximo que lleve. (Antes se daban todos los
+  // pagos por usados y lo que sobraba se anotaba como un pago nuevo, que en Ventas parecia plata
+  // nueva.)
   async function cerrarCuenta(cuenta, nombre) {
     const { estado, tablaPagos } = CUENTAS[cuenta];
     const pendientes = await traerTodo(() =>
       supabase.from(tablaPagos).select('monto_usd, monto_ars').eq('revendedor', nombre).eq('aplicado', false).order('id')
     );
     if (pendientes.error) return { error: pendientes.error };
+    const fecha = new Date().toISOString();
     let deudaUsd = 0;
     for (const tabla of ['celulares', 'accesorios']) {
       const { data, error } = await traerTodo(() =>
@@ -1667,28 +1669,32 @@ function Admin() {
         (porPrecio[precio] = porPrecio[precio] || []).push(u.id);
       });
       for (const [precio, ids] of Object.entries(porPrecio)) {
-        const { error: errorVenta } = await marcarVendido(tabla, ids, { precio_usd: Number(precio), cuenta_venta: cuenta });
+        const { error: errorVenta } = await marcarVendido(tabla, ids, { precio_usd: Number(precio), cuenta_venta: cuenta }, fecha);
         if (errorVenta) return { error: errorVenta };
       }
     }
-    const { error } = await supabase.from(tablaPagos).update({ aplicado: true }).eq('revendedor', nombre).eq('aplicado', false);
-    if (error) return { error };
 
     const entregadoUsd = pendientes.data.reduce((acc, p) => acc + (Number(p.monto_usd) || 0), 0);
     const entregadoArs = pendientes.data.reduce((acc, p) => acc + (Number(p.monto_ars) || 0), 0);
     const favorUsd = entregadoUsd - deudaUsd;
-    if (favorUsd < 0.005 || entregadoUsd <= 0) return { error: null, favorArs: 0 };
-    // Lo que sobra conserva los pesos que realmente entrego (proporcional a lo entregado),
-    // redondeado al peso para no arrastrar centavos de la conversion
+    if (favorUsd < 0.005 || entregadoUsd <= 0) {
+      const { error } = await supabase.from(tablaPagos).update({ aplicado: true }).eq('revendedor', nombre).eq('aplicado', false);
+      return { error, favorArs: 0 };
+    }
+    // Lo usado en los equipos conserva los pesos que realmente entrego (proporcional a lo entregado)
     const favorArs = Math.round(entregadoArs * (favorUsd / entregadoUsd));
-    const { error: errorFavor } = await supabase.from(tablaPagos).insert({
-      revendedor: nombre,
-      monto_ars: redondear(favorArs),
-      cotizacion: redondear(favorArs / favorUsd),
-      monto_usd: redondear(favorUsd),
-    });
-    if (errorFavor) {
-      return { error: { message: 'la cuenta se cerro, pero no se pudo guardar el saldo a favor de ARS $ ' + fmt(Math.round(favorArs)) + ' (' + errorFavor.message + ')' } };
+    if (deudaUsd > 0.005) {
+      const usadoArs = entregadoArs - favorArs;
+      const { error: errorUso } = await supabase.from(tablaPagos).insert({
+        revendedor: nombre,
+        monto_ars: -redondear(usadoArs),
+        cotizacion: redondear(usadoArs / deudaUsd),
+        monto_usd: -redondear(deudaUsd),
+        fecha,
+      });
+      if (errorUso) {
+        return { error: { message: 'los equipos quedaron vendidos, pero no se pudo descontar lo entregado a cuenta (' + errorUso.message + ')' } };
+      }
     }
     return { error: null, favorArs };
   }
@@ -1697,12 +1703,15 @@ function Admin() {
   const textoFavor = (resultado) =>
     resultado && resultado.favorArs > 0 ? ' Le quedan ARS $ ' + fmt(Math.round(resultado.favorArs)) + ' a favor para lo proximo que lleve.' : '';
 
+  // La fecha sale del mismo reloj que las ventas: si el pago cierra la cuenta, queda antes que
+  // la venta de sus equipos y en Ventas se ve que esos equipos se pagaron con este pago
   async function registrarPagoCuenta(cuenta, nombre, montoArs) {
     return supabase.from(CUENTAS[cuenta].tablaPagos).insert({
       revendedor: nombre,
       monto_ars: redondear(montoArs),
       cotizacion: cot,
       monto_usd: redondear(montoArs / cot),
+      fecha: new Date().toISOString(),
     });
   }
 
@@ -1988,7 +1997,8 @@ function Admin() {
       return;
     }
 
-    const { error } = await marcarVendido(lote.tabla, ids, { precio_usd: lote.precioUnidad, cuenta_venta: lote.cuenta });
+    const fecha = new Date().toISOString();
+    const { error } = await marcarVendido(lote.tabla, ids, { precio_usd: lote.precioUnidad, cuenta_venta: lote.cuenta }, fecha);
     if (error) {
       toast.error('Error al registrar el pago: ' + error.message);
       return;
@@ -2001,6 +2011,7 @@ function Admin() {
         monto_ars: -redondear(aplicadoArs),
         cotizacion: cot,
         monto_usd: -redondear(aplicadoUsd),
+        fecha,
       });
       if (errorAplicacion) {
         toast.error('Los equipos se marcaron como pagados, pero no se pudo descontar lo entregado a cuenta: ' + errorAplicacion.message);
@@ -2429,11 +2440,6 @@ function Admin() {
     ['tipo', 'modelo', 'color', 'detalles']
   );
 
-  // Ventas reales mas cobros a cuenta de revendedores (estimados), del mas nuevo al mas viejo
-  const movimientosGlobales = [...ventasGlobales, ...cobrosEstimados].sort(
-    (a, b) => new Date(b.fecha_venta) - new Date(a.fecha_venta)
-  );
-
   const mesesDisponibles = [...new Set(movimientosGlobales.map((v) => obtenerMesAnio(v.fecha_venta)))]
     .filter((m) => m !== 'Sin fecha')
     .sort()
@@ -2447,9 +2453,13 @@ function Admin() {
   // Los cobros a cuenta no son unidades vendidas: no suman en "Items vendidos"
   const totalVendidos = ventasFiltradas.filter((v) => v.categoria !== 'cobro').length;
   const cobrosFiltrados = ventasFiltradas.filter((v) => v.categoria === 'cobro');
-  const gananciaCobrosUSD = cobrosFiltrados.reduce((acc, v) => acc + gananciaDe(v), 0);
-  const gananciaVentasUSD = ventasFiltradas.reduce((acc, item) => acc + gananciaDe(item), 0);
-  const gananciaVentasARS = ventasFiltradas.reduce((acc, item) => acc + gananciaDe(item) * cotizacionDe(item), 0);
+  const gananciaCobrosUSD = cobrosFiltrados.reduce((acc, v) => acc + v.ganancia_usd, 0);
+  const cobradoVentasARS = ventasFiltradas.reduce((acc, v) => acc + v.cobrado_ars, 0);
+  const hayGananciaEstimada = cobrosFiltrados.some((v) => v.estimada);
+  const gananciaVentasUSD = ventasFiltradas.reduce((acc, item) => acc + item.ganancia_usd, 0);
+  const gananciaVentasARS = ventasFiltradas.reduce((acc, item) => acc + item.ganancia_usd * cotizacionDe(item), 0);
+  // Equipos de una cuenta pagados (todo o en parte) con plata que ya se habia contado antes
+  const hayVentasCubiertas = ventasFiltradas.some((v) => v.cubierto_usd > 0.005);
   // Hay ventas cuyo costo se paso a pesos con una cotizacion distinta de la de venta
   const hayCotizacionCosto = ventasFiltradas.some((v) => cotizacionCostoDe(v) !== cotizacionDe(v));
 
@@ -2481,6 +2491,12 @@ function Admin() {
         grupo.precio_usd += precio;
         grupo.costo_usd += costo;
         grupo.permuta_usd += permutaDe(v);
+        grupo.cobrado_usd += v.cobrado_usd;
+        grupo.cobrado_ars += v.cobrado_ars;
+        grupo.cubierto_usd += v.cubierto_usd;
+        grupo.cubierto_ars += v.cubierto_ars;
+        grupo.ganancia_usd += v.ganancia_usd;
+        grupo.ganancia_total_usd += v.ganancia_total_usd;
       } else {
         grupos.set(clave, {
           ...v,
@@ -2502,16 +2518,15 @@ function Admin() {
   const pagina = Math.min(paginaActual, Math.max(1, totalPaginas));
   const ventasPaginadas = ventasAgrupadas.slice((pagina - 1) * ventasPorPagina, pagina * ventasPorPagina);
 
-  // Total vendido por mes (ultimos 12 meses con ventas), en pesos a la cotizacion de cada
-  // venta (las que no tienen ese dato usan la actual). En las permutas cuenta lo cobrado en
-  // plata: el equipo recibido suma recien cuando se vende, asi no se cuenta dos veces.
+  // Plata que entro por mes (ultimos 12 meses con movimientos). Cada peso cuenta el dia en que
+  // entro: las ventas a la cotizacion de su dia, los pagos a cuenta por los pesos que se
+  // recibieron, y en las permutas solo la diferencia en plata (el equipo recibido suma cuando se
+  // vende). El equipo de una cuenta suma solo lo que no estaba pagado con entregas anteriores.
   const resumenMensual = mesesDisponibles.slice(0, 12).map((mes) => {
     const ventasMes = movimientosGlobales.filter((v) => obtenerMesAnio(v.fecha_venta) === mes);
-    const totalUsd = ventasMes.reduce((acc, v) => acc + cobradoDe(v), 0);
-    const totalArs = ventasMes.reduce((acc, v) => acc + cobradoDe(v) * cotizacionDe(v), 0);
-    const cobrosArs = ventasMes
-      .filter((v) => v.categoria === 'cobro')
-      .reduce((acc, v) => acc + (Number(v.precio_usd) || 0) * cotizacionDe(v), 0);
+    const totalUsd = ventasMes.reduce((acc, v) => acc + v.cobrado_usd, 0);
+    const totalArs = ventasMes.reduce((acc, v) => acc + v.cobrado_ars, 0);
+    const cobrosArs = ventasMes.filter((v) => v.categoria === 'cobro').reduce((acc, v) => acc + v.cobrado_ars, 0);
     return { mes, unidades: ventasMes.filter((v) => v.categoria !== 'cobro').length, totalUsd, totalArs, cobrosArs };
   });
 
@@ -2520,7 +2535,7 @@ function Admin() {
     .reverse()
     .map((mes) => {
       const ventasMes = movimientosGlobales.filter((v) => obtenerMesAnio(v.fecha_venta) === mes);
-      const ganancia = ventasMes.reduce((acc, c) => acc + gananciaDe(c), 0);
+      const ganancia = ventasMes.reduce((acc, c) => acc + c.ganancia_usd, 0);
       const [, month] = mes.split('-');
       return { name: MESES[parseInt(month) - 1] + ' ' + mes.slice(0, 4), Ganancia: redondear(ganancia) };
     });
@@ -2530,8 +2545,8 @@ function Admin() {
   const gananciaPorModelo = (() => {
     const totales = {};
     ventasFiltradas.forEach((v) => {
-      const nombre = String((v.categoria === 'celular' ? v.modelo : v.categoria === 'cobro' ? 'Cobros a cuenta (estimado)' : v.tipo) || 'Sin nombre').trim();
-      totales[nombre] = (totales[nombre] || 0) + gananciaDe(v);
+      const nombre = String((v.categoria === 'celular' ? v.modelo : v.categoria === 'cobro' ? 'Cobros a cuenta' : v.tipo) || 'Sin nombre').trim();
+      totales[nombre] = (totales[nombre] || 0) + v.ganancia_usd;
     });
     const ordenados = Object.entries(totales)
       .map(([name, ganancia]) => ({ name, Ganancia: redondear(ganancia) }))
@@ -3056,7 +3071,8 @@ function Admin() {
                       Registrar pago
                     </button>
                   )}
-                  {saldoCubierto(g.saldoUsd) && (
+                  {/* Con plata a favor y sin equipos no hay nada que cerrar: el saldo espera lo proximo que lleve */}
+                  {saldoCubierto(g.saldoUsd) && (g.unidades > 0 || g.saldoUsd > -0.005) && (
                     <button
                       type="button"
                       onClick={() => confirmarCierreCuenta(g)}
@@ -3172,25 +3188,31 @@ function Admin() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-3 md:gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
             <div className="min-w-0 bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-blue-500">
               <p className="text-gray-500 text-xs md:text-sm font-medium">Items Vendidos</p>
               <p className="text-xl md:text-3xl font-black mt-1 text-gray-800">{totalVendidos}</p>
+            </div>
+            <div className="min-w-0 bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-gray-800">
+              <p className="text-gray-500 text-xs md:text-sm font-medium">Plata que entro (ARS)</p>
+              <p className="text-xl md:text-3xl font-black mt-1 text-gray-900 break-words">$ {fmt(Math.round(cobradoVentasARS))}</p>
             </div>
             <div className="min-w-0 bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-green-500">
               <p className="text-gray-500 text-xs md:text-sm font-medium">Ganancia Neta (USD)</p>
               <p className="text-xl md:text-3xl font-black mt-1 text-green-600 break-words">$ {fmt(gananciaVentasUSD)}</p>
             </div>
-            <div className="min-w-0 bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-emerald-400 col-span-2 md:col-span-1">
+            <div className="min-w-0 bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-gray-200 border-l-4 border-l-emerald-400">
               <p className="text-gray-500 text-xs md:text-sm font-medium">Ganancia (ARS)</p>
-              <p className="text-xl md:text-3xl font-black mt-1 text-emerald-600 break-words">$ {fmt(gananciaVentasARS)}</p>
+              <p className="text-xl md:text-3xl font-black mt-1 text-emerald-600 break-words">$ {fmt(Math.round(gananciaVentasARS))}</p>
             </div>
           </div>
 
-          {cobrosFiltrados.length > 0 && (
+          {(cobrosFiltrados.length > 0 || hayVentasCubiertas) && (
             <p className="text-[11px] md:text-xs font-medium text-gray-500">
-              La ganancia incluye USD {fmt(gananciaCobrosUSD)} estimados por cobros a cuenta de revendedores y señas. Se calculan con el margen
-              de los equipos de cada cuenta y se reemplazan por las ventas reales cuando se cierra.
+              Cada peso cuenta una sola vez, el dia en que entro. Lo que entregan los revendedores y las señas suma el dia del pago; cuando
+              despues se marcan los equipos como pagados, solo suma lo que faltaba. La ganancia de cada equipo se reparte igual que su plata
+              {cobrosFiltrados.length > 0 ? ' (USD ' + fmt(gananciaCobrosUSD) + ' corresponden a cobros a cuenta)' : ''}.
+              {hayGananciaEstimada ? ' Lo entregado que todavia no pago ningun equipo lleva una ganancia estimada con el margen de lo que tiene esa persona.' : ''}
             </p>
           )}
 
@@ -3202,7 +3224,7 @@ function Admin() {
 
           {resumenMensual.length > 0 && (
             <div>
-              <h3 className="text-xs md:text-sm font-bold text-gray-500 mb-2 uppercase tracking-wider">Total vendido por mes</h3>
+              <h3 className="text-xs md:text-sm font-bold text-gray-500 mb-2 uppercase tracking-wider">Plata que entro por mes</h3>
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
                 {resumenMensual.map((r) => (
                   <button
@@ -3226,7 +3248,7 @@ function Admin() {
                 ))}
               </div>
               <p className="text-[10px] text-gray-400 mt-2">
-                Pesos a la cotizacion del dia de cada venta (las ventas sin ese dato usan la cotizacion actual). Los cobros a cuenta de revendedores y las señas cuentan en el mes en que se cobraron. Toca un mes para filtrar el historial.
+                Pesos a la cotizacion del dia de cada venta (las ventas sin ese dato usan la cotizacion actual) y, en los pagos a cuenta, los pesos que se recibieron. Los pagos de revendedores y señas quedan en el mes en que se cobraron, aunque la cuenta se cierre despues. Toca un mes para filtrar el historial.
               </p>
             </div>
           )}
@@ -3292,7 +3314,9 @@ function Admin() {
             >
               <div className="flex-grow grid grid-cols-1 sm:grid-cols-2 gap-px bg-gray-100 content-start">
                 {ventasPaginadas.map((item) => {
-                  const ganancia = gananciaDe(item);
+                  const ganancia = item.ganancia_usd;
+                  // Equipo de una cuenta pagado (todo o en parte) con plata entregada antes
+                  const cubierto = item.categoria !== 'cobro' && item.cubierto_usd > 0.005;
                   return (
                     <div key={item.claveGrupo} className="p-3 bg-white flex items-center justify-between gap-3 hover:bg-gray-50 transition">
                       <div className="min-w-0">
@@ -3313,18 +3337,35 @@ function Admin() {
                           <CirculoColor color={item.color} />
                         </div>
                         {/* Total de la venta, en pesos a la cotizacion de ese dia y en dolares.
-                            En una permuta se muestra lo cobrado en plata y, aparte, el equipo recibido. */}
+                            En una permuta se muestra lo cobrado en plata y, aparte, el equipo recibido.
+                            En un equipo de una cuenta, el precio y aparte cuanto ya se habia cobrado antes. */}
                         <div className="text-[11px] font-semibold text-gray-500">
                           {item.categoria === 'cobro' || permutaDe(item) > 0 ? 'Cobrado' : 'Venta'}:{' '}
-                          <span className="font-bold text-gray-800">ARS $ {fmt(Math.round(cobradoDe(item) * cotizacionDe(item)))}</span>
+                          <span className="font-bold text-gray-800">
+                            ARS $ {fmt(Math.round(cubierto ? item.precio_usd * cotizacionDe(item) : item.cobrado_ars))}
+                          </span>
                           {' - USD '}
-                          {fmt(cobradoDe(item))}
+                          {fmt(cubierto ? item.precio_usd : item.cobrado_usd)}
                           {item.cantidad > 1 ? ' (USD ' + fmt(item.precioUnidadUsd) + ' c/u)' : ''}
-                          {item.categoria === 'cobro' ? ' - ganancia estimada' : ''}
                         </div>
                         {origenDeVenta(item) && (
                           <div className="text-[11px] font-semibold text-purple-700">
                             {textoOrigen(origenDeVenta(item))} (pagado de su cuenta)
+                          </div>
+                        )}
+                        {cubierto && (
+                          <div className="text-[11px] font-semibold text-gray-500">
+                            Ya cobrado antes a cuenta: ARS $ {fmt(Math.round(item.cubierto_ars))}. Entro este dia:{' '}
+                            <span className="font-bold text-gray-800">ARS $ {fmt(Math.round(item.cobrado_ars))}</span>
+                          </div>
+                        )}
+                        {item.categoria === 'cobro' && (
+                          <div className="text-[11px] font-semibold text-gray-500">
+                            {item.pendiente_usd < 0.005
+                              ? 'Usado para pagar equipos ya vendidos'
+                              : item.aplicado_usd > 0.005
+                              ? 'Una parte pago equipos ya vendidos; quedan USD ' + fmt(item.pendiente_usd) + ' sin usar'
+                              : 'Todavia no pago ningun equipo'}
                           </div>
                         )}
                         {permutaDe(item) > 0 && (
@@ -3344,9 +3385,14 @@ function Admin() {
                         >
                           {ganancia < 0 ? '-' : '+'} $ {fmt(Math.abs(ganancia))}
                         </span>
+                        {cubierto && (
+                          <span className="text-[10px] font-semibold text-gray-400 text-right leading-tight max-w-[9rem]">
+                            Del equipo: USD {fmt(item.ganancia_total_usd)}. El resto esta en sus pagos.
+                          </span>
+                        )}
                         {item.categoria === 'cobro' ? (
                           <span className="flex items-center gap-3 py-1 text-[11px] font-bold">
-                            <span className="text-purple-700">Estimado</span>
+                            {item.estimada && <span className="text-purple-700">Estimado</span>}
                             <button onClick={() => verPagosDe(item)} className="text-blue-600 hover:underline">
                               Ver pagos
                             </button>

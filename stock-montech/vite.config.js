@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { transform } from 'lightningcss'
+import { fileURLToPath } from 'node:url'
 
 // Tailwind v4 define su paleta con oklch(), un formato de color que los navegadores anteriores
 // a Chrome 111 no entienden (por ejemplo Chrome 109, el ultimo que corre en Windows 7 y 8.1).
@@ -29,10 +30,15 @@ function cssParaNavegadoresViejos() {
   }
 }
 
-export default defineConfig({
+// npm run dev:prueba: el panel trabaja sobre una base de mentira en memoria (src/supabasePrueba.js),
+// sin iniciar sesion y sin tocar los datos reales
+export default defineConfig(({ mode }) => ({
   plugins: [
     tailwindcss(),
     react(),
     cssParaNavegadoresViejos(),
   ],
-})
+  resolve: mode === 'prueba'
+    ? { alias: [{ find: /^\.\/supabase$/, replacement: fileURLToPath(new URL('./src/supabasePrueba.js', import.meta.url)) }] }
+    : {},
+}))
