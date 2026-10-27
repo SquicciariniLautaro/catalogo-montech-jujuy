@@ -14,12 +14,18 @@
 // La ganancia de un equipo de una cuenta se reparte en la misma proporcion que la plata: cada
 // pago lleva la parte de ganancia de lo que pago. Lo entregado que todavia no se uso en ningun
 // equipo lleva una ganancia estimada con el margen de lo que esa persona tiene hoy.
+//
+// Los equipos entregados con precio fijo en pesos (precio_revendedor_ars) se pagan con los pesos
+// que entrego la persona, sin importar el dolar de cada dia: un equipo de 500 mil queda pagado con
+// 500 mil. Los anteriores, que se acordaban en dolares, se siguen cubriendo con los dolares de
+// cada pago, para que el historial no cambie.
 
 // Movimientos de una misma cuenta separados por menos de esto son una sola operacion (un pago que
 // cierra la cuenta y la venta de sus equipos). Dentro de una operacion la plata se toma antes que
 // los equipos, aunque los relojes del celular y de la base difieran en unos segundos.
 const VENTANA_OPERACION_MS = 2 * 60 * 1000;
 const CENTAVO = 0.005;
+const MEDIO_PESO = 0.5;
 
 const tiempo = (iso) => {
   const t = iso ? new Date(iso).getTime() : NaN;
@@ -51,12 +57,13 @@ export function contabilizar({ ventas, pagos, cuentaDeVenta, claveNombre, gananc
     return porCuenta.get(k).eventos;
   };
 
+  const ventasEnPesos = [];
   ventas.forEach((v) => {
-    const valor = (Number(v.precio_usd) || 0) - (Number(v.permuta_usd) || 0);
+    const valorUsd = (Number(v.precio_usd) || 0) - (Number(v.permuta_usd) || 0);
     const ganancia = gananciaDe(v);
     const mov = {
       ...v,
-      cobrado_usd: valor,
+      cobrado_usd: valorUsd,
       cubierto_usd: 0,
       cubierto_ars: 0,
       ganancia_total_usd: ganancia,
@@ -65,8 +72,16 @@ export function contabilizar({ ventas, pagos, cuentaDeVenta, claveNombre, gananc
     };
     movimientos.push(mov);
     const cuenta = mov.cuenta_origen;
-    if (cuenta) eventosDe(cuenta, v.revendedor).push({ tipo: 'venta', t: tiempo(v.fecha_venta), mov, valor, falta: valor });
+    if (!cuenta) return;
+    // Equipo de una cuenta con precio fijo en pesos: lo que falta se lleva en pesos
+    const precioArs = v.precio_revendedor_ars === null || v.precio_revendedor_ars === undefined ? NaN : Number(v.precio_revendedor_ars);
+    const enPesos = Number.isFinite(precioArs);
+    const valor = enPesos ? precioArs : valorUsd;
+    const evento = { tipo: 'venta', t: tiempo(v.fecha_venta), mov, enPesos, valor, falta: valor };
+    if (enPesos) ventasEnPesos.push(evento);
+    eventosDe(cuenta, v.revendedor).push(evento);
   });
+  const tolerancia = (venta) => (venta.enPesos ? MEDIO_PESO : CENTAVO);
 
   pagos.forEach((p) => {
     const usd = Number(p.monto_usd) || 0;
@@ -75,16 +90,17 @@ export function contabilizar({ ventas, pagos, cuentaDeVenta, claveNombre, gananc
     eventosDe(p.cuenta, p.revendedor).push({ tipo: 'pago', t: tiempo(p.fecha), pago: p, usd, ars: Number(p.monto_ars) || 0 });
   });
 
-  // Usa una parte de un pago para pagar una venta: la plata y la ganancia pasan al pago
-  const aplicar = (cobro, usd, venta) => {
-    const proporcion = venta.valor > 0 ? venta.mov.ganancia_total_usd / venta.valor : 0;
+  // Usa una parte de un pago para pagar una venta: la plata y la ganancia pasan al pago. usa es lo
+  // que cubre, en la moneda de la venta; usd y ars, lo que sale del pago.
+  const aplicar = (cobro, usa, usd, ars, venta) => {
+    const ganancia = venta.valor > 0 ? usa * (venta.mov.ganancia_total_usd / venta.valor) : 0;
     cobro.aplicado_usd += usd;
-    cobro.ganancia_usd += usd * proporcion;
+    cobro.ganancia_usd += ganancia;
     venta.mov.cubierto_usd += usd;
-    venta.mov.cubierto_ars += cobro.cobrado_usd > 0 ? usd * (cobro.cobrado_ars / cobro.cobrado_usd) : 0;
-    venta.mov.cobrado_usd -= usd;
-    venta.mov.ganancia_usd -= usd * proporcion;
-    venta.falta -= usd;
+    venta.mov.cubierto_ars += ars;
+    if (!venta.enPesos) venta.mov.cobrado_usd -= usd;
+    venta.mov.ganancia_usd -= ganancia;
+    venta.falta -= usa;
   };
 
   porCuenta.forEach(({ cuenta, clave, eventos }) => {
@@ -97,7 +113,7 @@ export function contabilizar({ ventas, pagos, cuentaDeVenta, claveNombre, gananc
       else operaciones.push([e]);
     });
 
-    const credito = []; // partes de pagos todavia sin usar: { cobro, usd }
+    const credito = []; // partes de pagos todavia sin usar: { cobro, usd, ars }
     const disponible = () => credito.reduce((acc, c) => acc + c.usd, 0);
 
     operaciones.forEach((operacion) => {
@@ -109,7 +125,7 @@ export function contabilizar({ ventas, pagos, cuentaDeVenta, claveNombre, gananc
       // mismo que ya se habia entregado, y se reconoce porque se anoto despues de la venta de los
       // equipos (los pagos reales se anotan antes) y es exactamente lo que sobra.
       let reescrito = null;
-      if (ventasOp.length > 0) {
+      if (ventasOp.length > 0 && !ventasOp.some((e) => e.enPesos)) {
         const totalPagos = pagosOp.reduce((acc, e) => acc + e.usd, 0);
         const totalVentas = ventasOp.reduce((acc, e) => acc + e.valor, 0);
         const ultimaVenta = Math.max(...ventasOp.map((e) => e.t));
@@ -139,16 +155,26 @@ export function contabilizar({ ventas, pagos, cuentaDeVenta, claveNombre, gananc
           estimada: false,
         };
         movimientos.push(cobro);
-        credito.push({ cobro, usd: e.usd });
+        credito.push({ cobro, usd: e.usd, ars: e.ars });
       });
 
       ventasOp.forEach((venta) => {
-        while (venta.falta >= CENTAVO && credito.length > 0) {
+        while (venta.falta >= tolerancia(venta) && credito.length > 0) {
           const parte = credito[0];
-          const usa = Math.min(parte.usd, venta.falta);
-          aplicar(parte.cobro, usa, venta);
-          parte.usd -= usa;
-          if (parte.usd < CENTAVO) credito.shift();
+          const hay = venta.enPesos ? parte.ars : parte.usd;
+          if (!(hay > 0)) {
+            credito.shift();
+            continue;
+          }
+          const usa = Math.min(hay, venta.falta);
+          // El pago se usa en proporcion: sus pesos y sus dolares bajan juntos
+          const fraccion = usa / hay;
+          const usd = parte.usd * fraccion;
+          const ars = parte.ars * fraccion;
+          aplicar(parte.cobro, usa, usd, ars, venta);
+          parte.usd -= usd;
+          parte.ars -= ars;
+          if (fraccion >= 1 - 1e-9 || (parte.usd < CENTAVO && parte.ars < MEDIO_PESO)) credito.shift();
         }
       });
 
@@ -171,8 +197,15 @@ export function contabilizar({ ventas, pagos, cuentaDeVenta, claveNombre, gananc
     });
   });
 
+  const enPesos = new Map(ventasEnPesos.map((e) => [e.mov, e]));
   movimientos.forEach((m) => {
-    if (m.categoria !== 'cobro') m.cobrado_ars = m.cobrado_usd * cotizacionDe(m);
+    if (m.categoria === 'cobro') return;
+    const venta = enPesos.get(m);
+    if (venta) {
+      // Entra en pesos lo que faltaba del precio fijo; los dolares, a la cotizacion de la venta
+      m.cobrado_ars = venta.falta >= MEDIO_PESO ? venta.falta : 0;
+      m.cobrado_usd = cotizacionDe(m) ? m.cobrado_ars / cotizacionDe(m) : 0;
+    } else m.cobrado_ars = m.cobrado_usd * cotizacionDe(m);
   });
   return movimientos;
 }
