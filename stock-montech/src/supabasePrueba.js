@@ -11,7 +11,7 @@ const masSegundos = (iso, s) => new Date(new Date(iso).getTime() + s * 1000).toI
 const celular = (id, modelo, estado, extra = {}) => ({
   id, modelo, capacidad: '128GB', color: 'Negro', bateria: 90, detalles: '', costo_usd: usd(400000), precio_usd: usd(500000),
   estado, fecha_venta: null, cotizacion_venta: null, cotizacion_costo: null, permuta_usd: null, cuenta_venta: null,
-  revendedor: null, precio_revendedor: null, fecha_revendedor: null, promediado: false, ...extra,
+  revendedor: null, precio_revendedor: null, precio_revendedor_ars: null, fecha_revendedor: null, promediado: false, ...extra,
 });
 const pago = (id, revendedor, ars, fecha, aplicado = false) => ({ id, revendedor, monto_ars: ars, cotizacion: COT, monto_usd: usd(ars), fecha, aplicado });
 

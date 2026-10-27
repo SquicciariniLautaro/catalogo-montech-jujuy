@@ -169,3 +169,33 @@ test('pago corregido con "dejar a su favor": la plata que entro no cambia', () =
   cerca(totalArs(movs), 1500000, 'siguen contando los 1.500.000');
   cerca(movs.find((m) => m.id === 10).cobrado_ars, 0, 'el equipo se pago con el pago de 500 mil');
 });
+
+// Audio del 26/10: el precio que se le pone al revendedor tiene que quedar fijo en pesos aunque
+// cambie el dolar. Equipo de 500 mil entregado con el dolar a 1500; paga con el dolar a 1600.
+const pagoA = (id, ars, cot, fecha, extra = {}) => pago(id, ars, fecha, { monto_usd: ars / cot, cotizacion: cot, ...extra });
+const ventaFija = (id, ars, costoArs, cot, fecha) =>
+  venta(id, ars, costoArs, fecha, { ...deCuenta, precio_usd: ars / cot, cotizacion_venta: cot, precio_revendedor_ars: ars });
+
+test('precio fijo en pesos: pagando los pesos acordados el equipo queda pagado aunque cambie el dolar', () => {
+  const pagos = [pagoA(1, 200000, 1500, '2026-10-05T12:00:00Z', { aplicado: true }), pagoA(2, 300000, 1600, '2026-10-20T12:00:00Z', { aplicado: true })];
+  const movs = contar([ventaFija(10, 500000, 400000, 1600, '2026-10-20T12:00:01Z')], pagos);
+  cerca(totalArs(movs), 500000, 'entraron exactamente los 500 mil');
+  cerca(movs.find((m) => m.id === 10).cobrado_ars, 0, 'el equipo no suma plata nueva');
+  cerca(movs.find((m) => m.id === 'pago-revendedor-2').sin_equipo_usd, 0, 'no queda nada para revisar');
+  cerca(gananciaUsd(movs), 500000 / 1600 - usd(400000), 'la ganancia del equipo se cuenta una sola vez');
+});
+
+test('precio fijo en pesos marcado "Pagado" con parte entregada: entra en pesos solo lo que faltaba', () => {
+  const pagos = [pagoA(1, 200000, 1500, '2026-10-05T12:00:00Z', { aplicado: true })];
+  const movs = contar([ventaFija(10, 500000, 400000, 1600, '2026-10-20T12:00:00Z')], pagos);
+  cerca(totalArs(movs, '2026-10-20'), 300000, 'el dia del pago entran 300 mil');
+  cerca(totalArs(movs), 500000, 'en total 500 mil');
+});
+
+test('precio fijo en pesos con plata de mas: lo que sobra queda sin usar', () => {
+  const pagos = [pagoA(1, 600000, 1600, '2026-10-20T12:00:00Z')];
+  const movs = contar([ventaFija(10, 500000, 400000, 1500, '2026-10-20T12:00:01Z')], pagos);
+  const cobro = movs.find((m) => m.id === 'pago-revendedor-1');
+  cerca(cobro.pendiente_usd, 100000 / 1600, 'quedan 100 mil (en dolares de ese pago) a su favor');
+  cerca(totalArs(movs), 600000, 'entraron 600 mil');
+});

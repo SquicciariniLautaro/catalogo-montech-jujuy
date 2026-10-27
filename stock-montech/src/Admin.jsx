@@ -369,6 +369,16 @@ const CUENTAS = {
   },
 };
 
+// Columnas que la base puede no tener todavia (se agregaron despues): si faltan, se guarda el
+// resto. precio_revendedor_ars es el precio en pesos acordado al entregar un equipo a una cuenta.
+const COLUMNAS_OPCIONALES = ['cotizacion_venta', 'cotizacion_costo', 'permuta_usd', 'cuenta_venta', 'precio_revendedor_ars'];
+// Datos de una entrega a revendedor o sena, que se borran cuando la unidad vuelve al local
+const SIN_CUENTA = { revendedor: null, precio_revendedor: null, precio_revendedor_ars: null, fecha_revendedor: null };
+// Diferencia en pesos que se toma como cero (redondeos)
+const MEDIO_PESO = 0.5;
+const AVISO_SIN_PRECIO_FIJO =
+  'Falta actualizar la base de datos (correr el SQL): mientras tanto, el precio de los revendedores y señas se sigue moviendo con el dolar.';
+
 // El costo se pasa a pesos con la cotizacion de costo y la venta con la de venta: la ganancia
 // es la diferencia en pesos, y en dolares se expresa a la cotizacion de venta.
 const calcularStats = (arrayStock, cot, cotCosto) => {
@@ -900,6 +910,7 @@ function Admin() {
   const [pagoRevendedor, setPagoRevendedor] = useState(null); // { cuenta, nombre, monto (ARS) }
   const [edicionPago, setEdicionPago] = useState(null); // { cuenta, nombre, pago, monto (ARS) }
   const [edicionVenta, setEdicionVenta] = useState(null); // { item, precio (ARS por unidad) }
+  const [edicionPrecioCuenta, setEdicionPrecioCuenta] = useState(null); // { lote, precio (ARS por unidad), cantidad }
   const [suma, setSuma] = useState(null); // { item, tabla, cantidad }
   const [borrado, setBorrado] = useState(null); // { item, tabla, cantidad }
   const [resolucion, setResolucion] = useState(null); // { lote, destino, cantidad }
@@ -955,15 +966,18 @@ function Admin() {
     if (tabla === 'celulares' && datos.permuta_usd === undefined) datos.permuta_usd = null;
     // Las ventas de una cuenta (revendedor o sena) guardan de cual salieron y conservan el nombre.
     // Una venta directa del local no viene de ninguna: se limpian datos de entregas anteriores.
-    if (datos.cuenta_venta === undefined) {
-      Object.assign(datos, { cuenta_venta: null, revendedor: null, precio_revendedor: null, fecha_revendedor: null });
-    }
+    if (datos.cuenta_venta === undefined) Object.assign(datos, { cuenta_venta: null, ...SIN_CUENTA });
+    return actualizarUnidades(tabla, ids, datos);
+  }
+
+  // Actualiza unidades. Si la base todavia no tiene alguna columna opcional, guarda el resto y
+  // devuelve en omitidas las que faltaron.
+  async function actualizarUnidades(tabla, ids, cambios) {
+    const datos = { ...cambios };
     const omitidas = [];
     for (;;) {
       const resultado = await porTandas(ids, (tanda) => supabase.from(tabla).update(datos).in('id', tanda));
-      const falta =
-        resultado.error &&
-        ['cotizacion_venta', 'cotizacion_costo', 'permuta_usd', 'cuenta_venta'].find((c) => c in datos && String(resultado.error.message).includes(c));
+      const falta = resultado.error && COLUMNAS_OPCIONALES.find((c) => c in datos && String(resultado.error.message).includes(c));
       if (!falta) return { ...resultado, omitidas };
       delete datos[falta];
       omitidas.push(falta);
@@ -1070,6 +1084,15 @@ function Admin() {
       ...pagosDeSenas.map((p) => ({ ...p, cuenta: 'sena' })),
     ]);
 
+    await fijarPreciosEnPesos(
+      [['celulares', celRevendedor], ['accesorios', accRevendedor], ['celulares', celSena], ['accesorios', accSena]],
+      [
+        ...[...(todosRevendedor.data || []), ...pagosDeSenas].map((p) => ({ fecha: p.fecha, cotizacion: p.cotizacion })),
+        ...ventasUnificadas.map((v) => ({ fecha: v.fecha_venta, cotizacion: v.cotizacion_venta })),
+      ],
+      Number(config.data && config.data.cotizacion_dolar) || cot
+    );
+
     // Precios por cantidad de los accesorios (tabla opcional: si falta, se vende a precio de lista)
     const esc = await traerTodo(() => supabase.from('escalas_precio').select('*').order('desde'));
     const mapaEscalas = {};
@@ -1111,6 +1134,39 @@ function Admin() {
     ]);
 
     if (mostrarLoader) setCargando(false);
+  }
+
+  // Los equipos que se entregaron a revendedores o senas antes de que el precio quedara fijo en
+  // pesos tienen solo el precio en dolares. Se fijan una sola vez, con el dolar del dia en que se
+  // entregaron: el del pago o la venta registrados mas cerca de ese momento (si no hay ninguno, el
+  // de hoy). Solo si la base ya tiene la columna. consultas son pares [tabla, resultado]; las
+  // filas se corrigen en el lugar para mostrar ya el precio fijado.
+  async function fijarPreciosEnPesos(consultas, referencias, dolarHoy) {
+    const sinFijar = consultas.flatMap(([tabla, r]) =>
+      (r.data || []).filter((u) => 'precio_revendedor_ars' in u && !tienePrecioFijo(u)).map((fila) => ({ tabla, fila }))
+    );
+    if (sinFijar.length === 0) return;
+    const conCotizacion = referencias
+      .map((r) => ({ t: new Date(r.fecha || 0).getTime(), cot: Number(r.cotizacion) || 0 }))
+      .filter((r) => r.cot > 0 && Number.isFinite(r.t) && r.t > 0);
+    const dolarDel = (fechaIso) => {
+      const t = new Date(fechaIso || 0).getTime();
+      if (!(t > 0) || conCotizacion.length === 0) return dolarHoy;
+      return conCotizacion.reduce((mejor, r) => (Math.abs(r.t - t) < Math.abs(mejor.t - t) ? r : mejor)).cot;
+    };
+    const porPrecio = new Map();
+    sinFijar.forEach(({ tabla, fila }) => {
+      const ars = Math.round(precioAcordadoUsdOriginal(fila) * dolarDel(fila.fecha_revendedor));
+      const k = tabla + '|' + ars;
+      if (!porPrecio.has(k)) porPrecio.set(k, { tabla, ars, filas: [] });
+      porPrecio.get(k).filas.push(fila);
+    });
+    for (const { tabla, ars, filas } of porPrecio.values()) {
+      const ids = filas.map((f) => f.id);
+      const { error } = await porTandas(ids, (tanda) => supabase.from(tabla).update({ precio_revendedor_ars: ars }).in('id', tanda));
+      if (error) return;
+      filas.forEach((f) => (f.precio_revendedor_ars = ars));
+    }
   }
 
   async function handleActualizarConfiguracion() {
@@ -1445,12 +1501,7 @@ function Admin() {
 
   async function anularVenta(item, ids) {
     const tabla = item.categoria === 'celular' ? 'celulares' : 'accesorios';
-    const { error } = await porTandas(ids, (tanda) =>
-      supabase
-        .from(tabla)
-        .update({ estado: 'disponible', fecha_venta: null, revendedor: null, precio_revendedor: null, fecha_revendedor: null })
-        .in('id', tanda)
-    );
+    const { error } = await actualizarUnidades(tabla, ids, { estado: 'disponible', fecha_venta: null, ...SIN_CUENTA });
     if (error) {
       toast.error('Error al anular la venta: ' + error.message);
       return;
@@ -1465,10 +1516,15 @@ function Admin() {
       ? item.modelo + ' ' + (item.capacidad || '') + ' - Bateria ' + item.bateria + '%'
       : item.tipo + ' - ' + item.modelo) + (item.color ? ' - ' + item.color : '');
 
-  // Lo que debe el revendedor por una unidad: el precio acordado al entregarla
-  // (si no se cargo, el precio de venta del equipo)
-  const precioAcordado = (u) =>
+  // Lo que debe el revendedor por una unidad: el precio en pesos acordado al entregarla. Queda
+  // fijo aunque cambie el dolar. Las unidades sin ese dato (si la base todavia no tiene la columna)
+  // usan el precio en dolares acordado (o el de venta del equipo) a la cotizacion de hoy.
+  const tienePrecioFijo = (u) => u.precio_revendedor_ars !== null && u.precio_revendedor_ars !== undefined;
+  const precioAcordadoUsdOriginal = (u) =>
     u.precio_revendedor === null || u.precio_revendedor === undefined ? Number(u.precio_usd) || 0 : Number(u.precio_revendedor) || 0;
+  const precioAcordadoArs = (u) => (tienePrecioFijo(u) ? Number(u.precio_revendedor_ars) || 0 : precioAcordadoUsdOriginal(u) * cot);
+  // En dolares, como referencia, a la cotizacion de hoy
+  const precioAcordado = (u) => (tienePrecioFijo(u) ? (cot ? precioAcordadoArs(u) / cot : 0) : precioAcordadoUsdOriginal(u));
 
   const diaEntrega = (u) => (u.fecha_revendedor ? new Date(u.fecha_revendedor).toLocaleDateString('es-AR') : '');
 
@@ -1476,15 +1532,16 @@ function Admin() {
 
   // Agrupa las unidades de una cuenta (revendedor o sena) por persona y, dentro de cada una,
   // por lote (mismo equipo, mismo precio acordado y mismo dia de entrega). Suma los pagos a
-  // cuenta de cada persona para calcular el saldo: deuda en USD menos lo entregado en USD.
+  // cuenta de cada persona para calcular el saldo, en pesos: lo que debe (los precios acordados)
+  // menos los pesos que entrego. Asi no se mueve cuando cambia el dolar.
   const armarGrupos = (cuenta, unidades, pagos, lista) => {
     const grupos = {};
     const grupo = (nombre) => {
       const k = normalizar(nombre);
       if (!grupos[k]) {
         grupos[k] = {
-          cuenta, nombre, unidades: 0, totalUsd: 0, costoTotalUsd: 0, lotes: {}, pagadoUsd: 0, pagadoArs: 0, pagos: 0, aplicadoUsd: 0, aplicadoArs: 0,
-          celular: '', idLista: null, movimientos: [],
+          cuenta, nombre, unidades: 0, totalUsd: 0, totalArs: 0, costoTotalUsd: 0, lotes: {}, pagadoUsd: 0, pagadoArs: 0, pagos: 0,
+          aplicadoUsd: 0, aplicadoArs: 0, celular: '', idLista: null, movimientos: [],
         };
       }
       return grupos[k];
@@ -1492,14 +1549,19 @@ function Admin() {
     unidades.forEach((u) => {
       const g = grupo(String(u.revendedor || '').trim() || 'Sin nombre');
       const precio = precioAcordado(u);
+      const precioArs = precioAcordadoArs(u);
       g.unidades += 1;
       g.totalUsd += precio;
+      g.totalArs += precioArs;
       g.costoTotalUsd += Number(u.costo_usd) || 0;
-      const kl = [u.tabla, u.tabla === 'celulares' ? claveCelular(u) : claveAccesorio(u), precio, diaEntrega(u)].join('|');
-      if (!g.lotes[kl]) g.lotes[kl] = { ...u, cuenta, cantidad: 0, ids: [], precioUnidad: precio, precioTotal: 0 };
+      const kl = [u.tabla, u.tabla === 'celulares' ? claveCelular(u) : claveAccesorio(u), Math.round(precioArs * 100), tienePrecioFijo(u), diaEntrega(u)].join('|');
+      if (!g.lotes[kl]) {
+        g.lotes[kl] = { ...u, cuenta, cantidad: 0, ids: [], precioUnidad: precio, precioTotal: 0, precioUnidadArs: precioArs, precioTotalArs: 0, fijo: tienePrecioFijo(u) };
+      }
       g.lotes[kl].cantidad += 1;
       g.lotes[kl].ids.push(u.id);
       g.lotes[kl].precioTotal += precio;
+      g.lotes[kl].precioTotalArs += precioArs;
     });
     pagos.forEach((pago) => {
       const g = grupo(String(pago.revendedor || '').trim() || 'Sin nombre');
@@ -1531,7 +1593,9 @@ function Admin() {
         // Margen = parte del precio acordado que es ganancia, sobre todos los equipos que tiene
         // (con el costo a la cotizacion de costo)
         const margen = g.totalUsd > 0 ? (g.totalUsd - g.costoTotalUsd * factorCosto) / g.totalUsd : 0;
-        return { ...g, lotes: Object.values(g.lotes), creditoUsd, creditoArs, margen, saldoUsd: g.totalUsd - creditoUsd };
+        // Saldo en pesos (negativo si tiene plata a favor). En dolares, solo como referencia.
+        const saldoArs = g.totalArs - creditoArs;
+        return { ...g, lotes: Object.values(g.lotes), creditoUsd, creditoArs, margen, saldoArs, saldoUsd: cot ? saldoArs / cot : 0 };
       })
       .sort((a, b) => comparar(a.nombre, b.nombre));
   };
@@ -1567,8 +1631,9 @@ function Admin() {
     },
   }).sort((a, b) => new Date(b.fecha_venta || 0) - new Date(a.fecha_venta || 0));
 
-  // Saldo menor a medio centavo de dolar se considera cubierto
-  const saldoCubierto = (saldoUsd) => saldoUsd < 0.005;
+  // Saldo (en pesos) menor a medio peso se considera cubierto
+  const saldoCubierto = (saldoArs) => saldoArs < MEDIO_PESO;
+  const aFavor = (saldoArs) => saldoArs <= -MEDIO_PESO;
 
   // La pestana Senas muestra lo mismo que Revendedores, con las cuentas de senas
   const cuentaTab = activeTab === 'senas' ? 'sena' : 'revendedor';
@@ -1576,9 +1641,10 @@ function Admin() {
   const gruposTab = gruposDe(cuentaTab);
   const unidadesTab = gruposTab.reduce((acc, g) => acc + g.unidades, 0);
   const totalEnLaCalleUsd = gruposTab.reduce((acc, g) => acc + g.totalUsd, 0);
+  const totalEnLaCalleArs = gruposTab.reduce((acc, g) => acc + g.totalArs, 0);
   const totalEntregadoUsd = gruposTab.reduce((acc, g) => acc + Math.max(0, g.creditoUsd), 0);
   const totalEntregadoArs = gruposTab.reduce((acc, g) => acc + Math.max(0, g.creditoArs), 0);
-  const saldoPendienteUsd = gruposTab.reduce((acc, g) => acc + Math.max(0, g.saldoUsd), 0);
+  const saldoPendienteArs = gruposTab.reduce((acc, g) => acc + Math.max(0, g.saldoArs), 0);
 
   // Persona (revendedor o cliente que seno) a la que pertenece un lote
   const grupoDeLote = (lote) => {
@@ -1605,7 +1671,7 @@ function Admin() {
   const textosCarrito = CUENTAS[carritoCuenta];
   const grupoCarrito = gruposDe(carritoCuenta).find((g) => normalizar(g.nombre) === normalizar(carritoNombre));
   // Saldo que ya tenia la persona: negativo si tiene plata a favor, que se descuenta del carrito
-  const saldoPrevioArs = grupoCarrito ? grupoCarrito.saldoUsd * cot : 0;
+  const saldoPrevioArs = grupoCarrito ? grupoCarrito.saldoArs : 0;
   const saldoCarritoFinalArs = saldoPrevioArs + totalCarritoArs - entregadoCarritoArs;
 
   const agregarAlCarrito = (item, tabla, cuenta = 'revendedor') => {
@@ -1650,6 +1716,25 @@ function Admin() {
   // que sobra queda a su favor y se descuenta de lo proximo que lleve. (Antes se daban todos los
   // pagos por usados y lo que sobraba se anotaba como un pago nuevo, que en Ventas parecia plata
   // nueva.)
+  // Pasa a vendidas unidades de una cuenta al precio acordado. Las de precio fijo en pesos se
+  // venden a esos pesos (en dolares, a la cotizacion de hoy) y conservan el precio en pesos, que
+  // en Ventas dice cuanto pagaron. Devuelve cuanto suman en pesos.
+  async function venderDeCuenta(tabla, unidades, cuenta, fecha) {
+    const porPrecio = new Map();
+    let totalArs = 0;
+    unidades.forEach((u) => {
+      const precioUsd = tienePrecioFijo(u) ? redondear(precioAcordadoArs(u) / cot) : precioAcordadoUsdOriginal(u);
+      totalArs += precioAcordadoArs(u);
+      if (!porPrecio.has(precioUsd)) porPrecio.set(precioUsd, []);
+      porPrecio.get(precioUsd).push(u.id);
+    });
+    for (const [precioUsd, ids] of porPrecio) {
+      const { error } = await marcarVendido(tabla, ids, { precio_usd: precioUsd, cuenta_venta: cuenta }, fecha);
+      if (error) return { error, totalArs };
+    }
+    return { error: null, totalArs };
+  }
+
   async function cerrarCuenta(cuenta, nombre) {
     const { estado, tablaPagos } = CUENTAS[cuenta];
     const pendientes = await traerTodo(() =>
@@ -1657,40 +1742,30 @@ function Admin() {
     );
     if (pendientes.error) return { error: pendientes.error };
     const fecha = new Date().toISOString();
-    let deudaUsd = 0;
+    let deudaArs = 0;
     for (const tabla of ['celulares', 'accesorios']) {
-      const { data, error } = await traerTodo(() =>
-        supabase.from(tabla).select('id, precio_usd, precio_revendedor').eq('estado', estado).eq('revendedor', nombre).order('id')
-      );
+      const { data, error } = await traerTodo(() => supabase.from(tabla).select('*').eq('estado', estado).eq('revendedor', nombre).order('id'));
       if (error) return { error };
-      const porPrecio = {};
-      (data || []).forEach((u) => {
-        const precio = precioAcordado(u);
-        deudaUsd += precio;
-        (porPrecio[precio] = porPrecio[precio] || []).push(u.id);
-      });
-      for (const [precio, ids] of Object.entries(porPrecio)) {
-        const { error: errorVenta } = await marcarVendido(tabla, ids, { precio_usd: Number(precio), cuenta_venta: cuenta }, fecha);
-        if (errorVenta) return { error: errorVenta };
-      }
+      const lotes = await venderDeCuenta(tabla, data || [], cuenta, fecha);
+      if (lotes.error) return { error: lotes.error };
+      deudaArs += lotes.totalArs;
     }
 
     const entregadoUsd = pendientes.data.reduce((acc, p) => acc + (Number(p.monto_usd) || 0), 0);
     const entregadoArs = pendientes.data.reduce((acc, p) => acc + (Number(p.monto_ars) || 0), 0);
-    const favorUsd = entregadoUsd - deudaUsd;
-    if (favorUsd < 0.005 || entregadoUsd <= 0) {
+    const favorArs = entregadoArs - deudaArs;
+    if (favorArs < MEDIO_PESO || entregadoArs <= 0) {
       const { error } = await supabase.from(tablaPagos).update({ aplicado: true }).eq('revendedor', nombre).eq('aplicado', false);
       return { error, favorArs: 0 };
     }
-    // Lo usado en los equipos conserva los pesos que realmente entrego (proporcional a lo entregado)
-    const favorArs = Math.round(entregadoArs * (favorUsd / entregadoUsd));
-    if (deudaUsd > 0.005) {
-      const usadoArs = entregadoArs - favorArs;
+    // Lo usado en los equipos son los pesos que debia; en dolares, la misma parte de lo entregado
+    if (deudaArs >= MEDIO_PESO) {
+      const usadoUsd = entregadoUsd * (deudaArs / entregadoArs);
       const { error: errorUso } = await supabase.from(tablaPagos).insert({
         revendedor: nombre,
-        monto_ars: -redondear(usadoArs),
-        cotizacion: redondear(usadoArs / deudaUsd),
-        monto_usd: -redondear(deudaUsd),
+        monto_ars: -redondear(deudaArs),
+        cotizacion: usadoUsd > 0 ? redondear(deudaArs / usadoUsd) : cot,
+        monto_usd: -redondear(usadoUsd),
         fecha,
       });
       if (errorUso) {
@@ -1737,16 +1812,20 @@ function Admin() {
     // Si ya existe una cuenta con ese nombre, se usa la misma escritura para no duplicarla
     const cuenta = carritoCuenta;
     const nombre = grupoCarrito ? grupoCarrito.nombre : escrito;
-    const saldoFinalUsd = (grupoCarrito ? grupoCarrito.saldoUsd : 0) + totalCarritoArs / cot - entregadoCarritoArs / cot;
+    const saldoFinalArs = saldoCarritoFinalArs;
     const fecha = new Date().toISOString();
 
+    let sinPrecioFijo = false;
     for (const item of itemsCarrito) {
-      const { error } = await porTandas(item.lote.ids.slice(0, item.cantidad), (tanda) =>
-        supabase
-          .from(item.tabla)
-          .update({ estado: CUENTAS[cuenta].estado, revendedor: nombre, precio_revendedor: redondear(item.precioArs / cot), fecha_revendedor: fecha })
-          .in('id', tanda)
-      );
+      // El precio queda fijo en pesos; en dolares se guarda solo como referencia
+      const { error, omitidas } = await actualizarUnidades(item.tabla, item.lote.ids.slice(0, item.cantidad), {
+        estado: CUENTAS[cuenta].estado,
+        revendedor: nombre,
+        precio_revendedor: redondear(item.precioArs / cot),
+        precio_revendedor_ars: redondear(item.precioArs),
+        fecha_revendedor: fecha,
+      });
+      if (omitidas.includes('precio_revendedor_ars')) sinPrecioFijo = true;
       if (error) {
         // La base todavia no acepta el estado de las senas: falta correr el SQL de esta version
         toast.error(
@@ -1760,6 +1839,7 @@ function Admin() {
       }
     }
 
+    if (sinPrecioFijo) toast.error(AVISO_SIN_PRECIO_FIJO, { duration: 9000 });
     if (cuenta === 'revendedor') await asegurarEnLista(nombre, carritoCelular);
 
     if (entregadoCarritoArs > 0) {
@@ -1767,12 +1847,12 @@ function Admin() {
       if (error) toast.error('Los equipos se asignaron, pero no se pudo guardar el monto entregado: ' + error.message);
     }
 
-    if (saldoCubierto(saldoFinalUsd)) {
+    if (saldoCubierto(saldoFinalArs)) {
       const cierre = await cerrarCuenta(cuenta, nombre);
       if (cierre.error) toast.error('No se pudo cerrar la cuenta: ' + cierre.error.message);
       else toast.success('Pago completo: los equipos de ' + nombre + ' quedaron como vendidos.' + textoFavor(cierre), { duration: 6000 });
     } else {
-      toast.success(unidadesCarrito + CUENTAS[cuenta].asignadas + nombre + '. Saldo: ARS $ ' + fmt(Math.round(saldoFinalUsd * cot)));
+      toast.success(unidadesCarrito + CUENTAS[cuenta].asignadas + nombre + '. Saldo: ARS $ ' + fmt(Math.round(saldoFinalArs)));
     }
     setCarrito([]);
     setCarritoNombre('');
@@ -1785,7 +1865,7 @@ function Admin() {
   // ---------- Pagos a cuenta ----------
   const grupoPago = pagoRevendedor ? gruposDe(pagoRevendedor.cuenta).find((g) => g.nombre === pagoRevendedor.nombre) : null;
   const montoPagoArs = pagoRevendedor ? parseFloat(pagoRevendedor.monto) || 0 : 0;
-  const saldoTrasPagoUsd = grupoPago ? grupoPago.saldoUsd - (cot ? montoPagoArs / cot : 0) : 0;
+  const saldoTrasPagoArs = grupoPago ? grupoPago.saldoArs - montoPagoArs : 0;
 
   async function confirmarPagoRevendedor() {
     const { cuenta, nombre } = pagoRevendedor;
@@ -1797,7 +1877,7 @@ function Admin() {
       toast.error('La cotizacion debe ser mayor a cero');
       return;
     }
-    const saldoFinal = saldoTrasPagoUsd;
+    const saldoFinal = saldoTrasPagoArs;
     setPagoRevendedor(null);
     const { error } = await registrarPagoCuenta(cuenta, nombre, montoPagoArs);
     if (error) {
@@ -1809,7 +1889,7 @@ function Admin() {
       if (cierre.error) toast.error('El pago se guardo, pero no se pudo cerrar la cuenta: ' + cierre.error.message);
       else toast.success('Saldo cubierto: los equipos de ' + nombre + ' quedaron como vendidos.' + textoFavor(cierre), { duration: 6000 });
     } else {
-      toast.success('Pago registrado. Saldo de ' + nombre + ': ARS $ ' + fmt(Math.round(saldoFinal * cot)));
+      toast.success('Pago registrado. Saldo de ' + nombre + ': ARS $ ' + fmt(Math.round(saldoFinal)));
     }
     cargarDatos(false);
   }
@@ -1822,11 +1902,11 @@ function Admin() {
   // El pago conserva la cotizacion del dia en que se cobro
   const cotEdicionPago = edicionPago ? Number(edicionPago.pago.cotizacion) || cot : 0;
   const usdEdicionPago = cotEdicionPago ? montoEdicionArs / cotEdicionPago : 0;
-  const saldoTrasEdicionUsd = grupoEdicionPago ? grupoEdicionPago.saldoUsd + edicionPago.pago.usd - usdEdicionPago : 0;
+  const saldoTrasEdicionArs = grupoEdicionPago ? grupoEdicionPago.saldoArs + edicionPago.pago.ars - montoEdicionArs : 0;
 
   // Lo entregado no puede quedar por debajo de lo que ya se desconto en equipos marcados como
   // pagados: esos equipos ya figuran como ventas cobradas con esa plata.
-  const cubreLoAplicado = (g, pago, nuevoUsd) => g.pagadoUsd - pago.usd + nuevoUsd >= g.aplicadoUsd - 0.005;
+  const cubreLoAplicado = (g, pago, nuevoArs) => g.pagadoArs - pago.ars + nuevoArs >= g.aplicadoArs - MEDIO_PESO;
   const avisoAplicado = (g) =>
     'De lo que entrego ' + g.nombre + ' ya se usaron ARS $ ' + fmt(Math.round(g.aplicadoArs)) +
     ' en equipos marcados como pagados. El total entregado no puede quedar por debajo de eso.';
@@ -1838,11 +1918,11 @@ function Admin() {
       toast.error('Indica el monto correcto. Para sacar el pago, usa "Eliminar".');
       return;
     }
-    if (grupo && !cubreLoAplicado(grupo, pago, usdEdicionPago)) {
+    if (grupo && !cubreLoAplicado(grupo, pago, montoEdicionArs)) {
       toast.error(avisoAplicado(grupo), { duration: 7000 });
       return;
     }
-    const saldoFinal = saldoTrasEdicionUsd;
+    const saldoFinal = saldoTrasEdicionArs;
     setEdicionPago(null);
     const { error } = await supabase
       .from(CUENTAS[cuenta].tablaPagos)
@@ -1857,7 +1937,7 @@ function Admin() {
       if (cierre.error) toast.error('El pago se corrigio, pero no se pudo cerrar la cuenta: ' + cierre.error.message);
       else toast.success('Saldo cubierto: los equipos de ' + nombre + ' quedaron como vendidos.' + textoFavor(cierre), { duration: 6000 });
     } else {
-      toast.success('Pago corregido. Saldo de ' + nombre + ': ARS $ ' + fmt(Math.round(saldoFinal * cot)));
+      toast.success('Pago corregido. Saldo de ' + nombre + ': ARS $ ' + fmt(Math.round(saldoFinal)));
     }
     cargarDatos(false);
   }
@@ -1959,8 +2039,9 @@ function Admin() {
   };
 
   // ---------- Corregir el precio de una venta ya registrada ----------
-  const abrirEdicionVenta = (item) =>
-    setEdicionVenta({ item, precio: Math.round(item.precioUnidadUsd * cotizacionDe(item)) });
+  // Las ventas de una cuenta con precio fijo en pesos muestran exactamente esos pesos
+  const precioUnidadArsDe = (item) => (tienePrecioFijo(item) ? Number(item.precio_revendedor_ars) : item.precioUnidadUsd * cotizacionDe(item));
+  const abrirEdicionVenta = (item) => setEdicionVenta({ item, precio: Math.round(precioUnidadArsDe(item)) });
 
   const precioEdicionVentaArs = edicionVenta ? parseFloat(edicionVenta.precio) : NaN;
 
@@ -1974,12 +2055,62 @@ function Admin() {
     // Se convierte con la cotizacion del dia de la venta, para no mover el resto del historial
     const precioUsd = redondear(precioEdicionVentaArs / cotizacionDe(item));
     setEdicionVenta(null);
-    const { error } = await porTandas(item.ids, (tanda) => supabase.from(tabla).update({ precio_usd: precioUsd }).in('id', tanda));
+    // Si salio de una cuenta con precio fijo en pesos, se corrige tambien ese precio
+    const cambios = { precio_usd: precioUsd };
+    if (tienePrecioFijo(item)) cambios.precio_revendedor_ars = redondear(precioEdicionVentaArs);
+    const { error } = await actualizarUnidades(tabla, item.ids, cambios);
     if (error) {
       toast.error('No se pudo corregir la venta: ' + error.message);
       return;
     }
     toast.success('Venta corregida');
+    cargarDatos(false);
+  }
+
+  // ---------- Corregir el precio de un equipo que tiene un revendedor o una sena ----------
+  // Cambia solo lo que debe esa persona por ese equipo: el saldo sube o baja la diferencia. No
+  // toca el precio del stock ni lo que ya entrego.
+  const abrirEdicionPrecioCuenta = (lote) =>
+    setEdicionPrecioCuenta({ lote, precio: Math.round(lote.precioUnidadArs), cantidad: lote.cantidad });
+
+  const precioCuentaArs = edicionPrecioCuenta ? parseFloat(edicionPrecioCuenta.precio) : NaN;
+  const cantidadPrecioCuenta = edicionPrecioCuenta
+    ? Math.min(edicionPrecioCuenta.lote.cantidad, Math.max(1, parseInt(edicionPrecioCuenta.cantidad) || 1))
+    : 0;
+  const grupoPrecioCuenta = edicionPrecioCuenta ? grupoDeLote(edicionPrecioCuenta.lote) : null;
+  const diferenciaPrecioCuentaArs = edicionPrecioCuenta
+    ? ((precioCuentaArs || 0) - edicionPrecioCuenta.lote.precioUnidadArs) * cantidadPrecioCuenta
+    : 0;
+  const saldoTrasPrecioArs = grupoPrecioCuenta ? grupoPrecioCuenta.saldoArs + diferenciaPrecioCuentaArs : 0;
+
+  async function guardarPrecioCuenta() {
+    const { lote } = edicionPrecioCuenta;
+    if (!(precioCuentaArs >= 0)) {
+      toast.error('Indica el precio correcto');
+      return;
+    }
+    if (!cot) {
+      toast.error('La cotizacion debe ser mayor a cero');
+      return;
+    }
+    const nombre = grupoPrecioCuenta ? grupoPrecioCuenta.nombre : String(lote.revendedor || '').trim();
+    const saldoFinal = saldoTrasPrecioArs;
+    const tieneEquipos = grupoPrecioCuenta && grupoPrecioCuenta.unidades > 0;
+    setEdicionPrecioCuenta(null);
+    const { error, omitidas } = await actualizarUnidades(lote.tabla, lote.ids.slice(0, cantidadPrecioCuenta), {
+      precio_revendedor: redondear(precioCuentaArs / cot),
+      precio_revendedor_ars: redondear(precioCuentaArs),
+    });
+    if (error) {
+      toast.error('No se pudo corregir el precio: ' + error.message);
+      return;
+    }
+    if (omitidas.includes('precio_revendedor_ars')) toast.error(AVISO_SIN_PRECIO_FIJO, { duration: 9000 });
+    toast.success(
+      'Precio corregido. Saldo de ' + nombre + ': ' + (aFavor(saldoFinal) ? 'a su favor ' : '') + 'ARS $ ' + fmt(Math.round(Math.abs(saldoFinal))) +
+        (tieneEquipos && saldoCubierto(saldoFinal) ? '. Ya cubre lo que debe: podes cerrar la cuenta.' : ''),
+      { duration: 6000 }
+    );
     cargarDatos(false);
   }
 
@@ -1990,8 +2121,8 @@ function Admin() {
         (g.unidades > 0
           ? 'Sus ' + g.unidades + ' unidad(es) pasan al historial de ventas al precio acordado y los pagos a cuenta se dan por aplicados.'
           : 'No tiene equipos a su nombre. Los pagos a cuenta se dan por aplicados y la cuenta queda en cero.') +
-        (g.saldoUsd < -0.005
-          ? ' Lo que entrego de mas (ARS $ ' + fmt(Math.round(-g.saldoUsd * cot)) + ') le sigue quedando a favor.'
+        (aFavor(g.saldoArs)
+          ? ' Lo que entrego de mas (ARS $ ' + fmt(Math.round(-g.saldoArs)) + ') le sigue quedando a favor.'
           : ''),
       botones: [
         {
@@ -2014,9 +2145,9 @@ function Admin() {
     const { tabla } = lote;
     const claveFn = tabla === 'celulares' ? claveCelular : claveAccesorio;
     const enLocal = (tabla === 'celulares' ? stockCelulares : stockAccesorios).find((l) => claveFn(l) === claveFn(lote));
-    const datos = { estado: 'disponible', revendedor: null, precio_revendedor: null, fecha_revendedor: null };
+    const datos = { estado: 'disponible', ...SIN_CUENTA };
     if (enLocal) Object.assign(datos, { costo_usd: enLocal.costo_usd, precio_usd: enLocal.precio_usd });
-    const { error } = await porTandas(ids, (tanda) => supabase.from(tabla).update(datos).in('id', tanda));
+    const { error } = await actualizarUnidades(tabla, ids, datos);
     if (error) {
       toast.error('Error al actualizar: ' + error.message);
       return;
@@ -2036,24 +2167,26 @@ function Admin() {
 
   // Al marcar equipos como pagados, primero se descuenta lo que el revendedor ya entrego a
   // cuenta; lo que falte se toma como cobrado en ese momento.
+  // Todo en pesos: el precio acordado y lo que entrego no cambian con el dolar.
   const grupoResolucion = resolucion ? grupoDeLote(resolucion.lote) : null;
-  const valorResolucionUsd = resolucion ? resolucion.lote.precioUnidad * cantidadResolucion : 0;
-  const aplicaCreditoUsd =
-    resolucion && resolucion.destino === 'vendido' && grupoResolucion
-      ? Math.min(Math.max(grupoResolucion.creditoUsd, 0), valorResolucionUsd)
-      : 0;
+  const valorResolucionArs = resolucion ? resolucion.lote.precioUnidadArs * cantidadResolucion : 0;
   const aplicaCreditoArs =
-    grupoResolucion && grupoResolucion.creditoUsd > 0
-      ? grupoResolucion.creditoArs * (aplicaCreditoUsd / grupoResolucion.creditoUsd)
+    resolucion && resolucion.destino === 'vendido' && grupoResolucion
+      ? Math.min(Math.max(grupoResolucion.creditoArs, 0), valorResolucionArs)
       : 0;
-  const cobroAhoraArs = Math.max(0, valorResolucionUsd * cot - aplicaCreditoArs);
+  // En dolares, la misma parte de lo entregado (a la cotizacion de cada pago)
+  const aplicaCreditoUsd =
+    grupoResolucion && grupoResolucion.creditoArs > 0
+      ? grupoResolucion.creditoUsd * (aplicaCreditoArs / grupoResolucion.creditoArs)
+      : 0;
+  const cobroAhoraArs = Math.max(0, valorResolucionArs - aplicaCreditoArs);
 
   async function ejecutarResolucion() {
     const { lote, destino } = resolucion;
     const ids = lote.ids.slice(0, cantidadResolucion);
     const grupo = grupoResolucion;
     const nombre = grupo ? grupo.nombre : String(lote.revendedor || '').trim();
-    const valorUsd = valorResolucionUsd;
+    const valorArs = valorResolucionArs;
     const aplicadoUsd = aplicaCreditoUsd;
     const aplicadoArs = aplicaCreditoArs;
     setResolucion(null);
@@ -2064,18 +2197,18 @@ function Admin() {
     }
 
     const fecha = new Date().toISOString();
-    const { error } = await marcarVendido(lote.tabla, ids, { precio_usd: lote.precioUnidad, cuenta_venta: lote.cuenta }, fecha);
+    const { error } = await venderDeCuenta(lote.tabla, ids.map((id) => ({ ...lote, id })), lote.cuenta, fecha);
     if (error) {
       toast.error('Error al registrar el pago: ' + error.message);
       return;
     }
 
     // Lo entregado a cuenta que cubre estos equipos se descuenta con una fila negativa
-    if (aplicadoUsd > 0.005) {
+    if (aplicadoArs >= MEDIO_PESO) {
       const { error: errorAplicacion } = await supabase.from(CUENTAS[lote.cuenta].tablaPagos).insert({
         revendedor: nombre,
         monto_ars: -redondear(aplicadoArs),
-        cotizacion: cot,
+        cotizacion: aplicadoUsd > 0 ? redondear(aplicadoArs / aplicadoUsd) : cot,
         monto_usd: -redondear(aplicadoUsd),
         fecha,
       });
@@ -2086,14 +2219,14 @@ function Admin() {
 
     // Cobrar equipos ahora baja el saldo; si no quedan equipos o el saldo queda cubierto, se cierra la cuenta
     const quedan = grupo ? grupo.unidades - ids.length : 0;
-    const saldoNuevoUsd = grupo ? grupo.saldoUsd - (valorUsd - aplicadoUsd) : 0;
-    if (quedan === 0 || saldoCubierto(saldoNuevoUsd)) {
+    const saldoNuevoArs = grupo ? grupo.saldoArs - (valorArs - aplicadoArs) : 0;
+    if (quedan === 0 || saldoCubierto(saldoNuevoArs)) {
       const cierre = await cerrarCuenta(lote.cuenta, nombre);
       if (cierre.error) toast.error('Se registro el pago, pero no se pudo cerrar la cuenta: ' + cierre.error.message);
       else toast.success('Cuenta de ' + nombre + ' saldada: sus equipos quedaron como vendidos.' + textoFavor(cierre), { duration: 6000 });
     } else {
       toast.success(
-        ids.length + ' unidad(es) marcada(s) como pagada(s). Saldo de ' + nombre + ': ARS $ ' + fmt(Math.round(saldoNuevoUsd * cot))
+        ids.length + ' unidad(es) marcada(s) como pagada(s). Saldo de ' + nombre + ': ARS $ ' + fmt(Math.round(saldoNuevoArs))
       );
     }
     cargarDatos(false);
@@ -2155,13 +2288,13 @@ function Admin() {
       aviso(g.nombre + ' todavia tiene ' + g.unidades + ' equipo(s) en su poder. Registra el pago o la devolucion antes de eliminarlo.');
       return;
     }
-    if (g.saldoUsd > 0.005) {
-      aviso(g.nombre + ' todavia debe ARS $ ' + fmt(Math.round(g.saldoUsd * cot)) + '. Registra el pago antes de eliminarlo.');
+    if (g.saldoArs >= MEDIO_PESO) {
+      aviso(g.nombre + ' todavia debe ARS $ ' + fmt(Math.round(g.saldoArs)) + '. Registra el pago antes de eliminarlo.');
       return;
     }
-    if (g.saldoUsd < -0.005) {
+    if (aFavor(g.saldoArs)) {
       aviso(
-        g.nombre + ' tiene ARS $ ' + fmt(Math.round(-g.saldoUsd * cot)) +
+        g.nombre + ' tiene ARS $ ' + fmt(Math.round(-g.saldoArs)) +
           ' a favor. Si se los devolviste, elimina ese pago desde su detalle antes de eliminarlo.'
       );
       return;
@@ -3029,7 +3162,7 @@ function Admin() {
               </div>
               <div className="border-l-4 border-blue-500 pl-3 min-w-0">
                 <p className="text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1">Total equipos</p>
-                <p className="font-black text-base md:text-xl text-gray-800 break-words">ARS $ {fmt(Math.round(totalEnLaCalleUsd * cot))}</p>
+                <p className="font-black text-base md:text-xl text-gray-800 break-words">ARS $ {fmt(Math.round(totalEnLaCalleArs))}</p>
                 <p className="text-[11px] font-semibold text-gray-500">USD {fmt(totalEnLaCalleUsd)}</p>
               </div>
               <div className="border-l-4 border-green-500 pl-3 min-w-0">
@@ -3039,8 +3172,8 @@ function Admin() {
               </div>
               <div className="border-l-4 border-purple-500 pl-3 min-w-0">
                 <p className="text-gray-500 text-[11px] md:text-xs font-semibold uppercase tracking-wider mb-1">Saldo pendiente</p>
-                <p className="font-black text-base md:text-xl text-purple-700 break-words">ARS $ {fmt(Math.round(saldoPendienteUsd * cot))}</p>
-                <p className="text-[11px] font-semibold text-gray-500">USD {fmt(saldoPendienteUsd)}</p>
+                <p className="font-black text-base md:text-xl text-purple-700 break-words">ARS $ {fmt(Math.round(saldoPendienteArs))}</p>
+                <p className="text-[11px] font-semibold text-gray-500">USD {fmt(cot ? saldoPendienteArs / cot : 0)}</p>
               </div>
               <p className="col-span-2 md:col-span-4 text-[11px] text-gray-400">
                 {textosTab.explicacion}
@@ -3084,9 +3217,9 @@ function Admin() {
                   </span>
                   <span className="shrink-0 text-right">
                     <span className="block text-[11px] font-bold text-gray-500 uppercase tracking-wide">
-                      {g.saldoUsd < -0.005 ? 'A su favor' : 'Saldo pendiente'}
+                      {aFavor(g.saldoArs) ? 'A su favor' : 'Saldo pendiente'}
                     </span>
-                    <span className="block text-base md:text-lg font-black text-purple-700">ARS $ {fmt(Math.round(Math.abs(g.saldoUsd) * cot))}</span>
+                    <span className="block text-base md:text-lg font-black text-purple-700">ARS $ {fmt(Math.round(Math.abs(g.saldoArs)))}</span>
                     <span className="block text-xs font-bold text-gray-500">USD {fmt(Math.abs(g.saldoUsd))}</span>
                   </span>
                   <IconoFlecha abierto={abierto} />
@@ -3104,7 +3237,7 @@ function Admin() {
                 {tieneMovimientos(g) && (
                 <div className="px-3 md:px-4 py-2 border-b border-gray-200 grid grid-cols-2 gap-2 text-xs font-semibold text-gray-600">
                   <span>
-                    Total equipos: <span className="font-bold text-gray-900">ARS $ {fmt(Math.round(g.totalUsd * cot))}</span>
+                    Total equipos: <span className="font-bold text-gray-900">ARS $ {fmt(Math.round(g.totalArs))}</span>
                   </span>
                   <span className="text-right">
                     Entregado a cuenta: <span className="font-bold text-gray-900">ARS $ {fmt(Math.round(Math.max(0, g.creditoArs)))}</span>
@@ -3167,7 +3300,7 @@ function Admin() {
                     </button>
                   )}
                   {/* Con plata a favor y sin equipos no hay nada que cerrar: el saldo espera lo proximo que lleve */}
-                  {saldoCubierto(g.saldoUsd) && (g.unidades > 0 || g.saldoUsd > -0.005) && (
+                  {saldoCubierto(g.saldoArs) && (g.unidades > 0 || !aFavor(g.saldoArs)) && (
                     <button
                       type="button"
                       onClick={() => confirmarCierreCuenta(g)}
@@ -3223,11 +3356,13 @@ function Admin() {
                         )}
                       </div>
                       <div className="text-sm font-bold text-gray-800 md:text-right md:w-44">
-                        USD {fmt(lote.precioTotal)}
-                        <span className="block text-[11px] font-semibold text-gray-500">ARS $ {fmt(Math.round(lote.precioTotal * cot))}</span>
+                        ARS $ {fmt(Math.round(lote.precioTotalArs))}
                         {lote.cantidad > 1 && (
-                          <span className="block text-[11px] font-semibold text-gray-400">USD {fmt(lote.precioUnidad)} c/u</span>
+                          <span className="block text-[11px] font-semibold text-gray-500">ARS $ {fmt(Math.round(lote.precioUnidadArs))} c/u</span>
                         )}
+                        <span className="block text-[11px] font-semibold text-gray-400">
+                          {lote.fijo ? 'Precio fijo en pesos' : 'USD ' + fmt(lote.precioTotal)}
+                        </span>
                       </div>
                       <div className="flex gap-2">
                         <button
@@ -3235,6 +3370,12 @@ function Admin() {
                           className="flex-1 md:flex-none bg-green-600 text-white px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-green-700 transition"
                         >
                           Pagado
+                        </button>
+                        <button
+                          onClick={() => abrirEdicionPrecioCuenta(lote)}
+                          className="flex-1 md:flex-none bg-white border border-gray-300 text-gray-800 px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-gray-50 transition"
+                        >
+                          Precio
                         </button>
                         <button
                           onClick={() => confirmarResolucion(lote, 'disponible')}
@@ -3532,7 +3673,7 @@ function Admin() {
                         <div className="text-[11px] font-semibold text-gray-500">
                           {item.categoria === 'cobro' || permutaDe(item) > 0 ? 'Cobrado' : 'Venta'}:{' '}
                           <span className="font-bold text-gray-800">
-                            ARS $ {fmt(Math.round(cubierto ? item.precio_usd * cotizacionDe(item) : item.cobrado_ars))}
+                            ARS $ {fmt(Math.round(cubierto ? precioUnidadArsDe(item) * item.cantidad : item.cobrado_ars))}
                           </span>
                           {' - USD '}
                           {fmt(cubierto ? item.precio_usd : item.cobrado_usd)}
@@ -3960,7 +4101,7 @@ function Admin() {
 
             <div className="mt-3 flex justify-between gap-2 text-sm font-semibold text-gray-600">
               <span>Saldo actual</span>
-              <span className="font-black text-gray-900">ARS $ {fmt(Math.round(grupoPago.saldoUsd * cot))}</span>
+              <span className="font-black text-gray-900">ARS $ {fmt(Math.round(grupoPago.saldoArs))}</span>
             </div>
 
             <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">Monto que entrega (pesos ARS)</label>
@@ -3971,10 +4112,10 @@ function Admin() {
               onChange={(monto) => setPagoRevendedor({ ...pagoRevendedor, monto })}
               className={claseInputModal + ' font-bold'}
             />
-            {grupoPago.saldoUsd > 0 && (
+            {grupoPago.saldoArs >= MEDIO_PESO && (
               <button
                 type="button"
-                onClick={() => setPagoRevendedor({ ...pagoRevendedor, monto: Math.round(grupoPago.saldoUsd * cot) })}
+                onClick={() => setPagoRevendedor({ ...pagoRevendedor, monto: Math.round(grupoPago.saldoArs) })}
                 className="mt-2 text-xs font-bold text-blue-600 hover:underline py-1"
               >
                 Paga todo el saldo
@@ -3983,13 +4124,13 @@ function Admin() {
 
             <div className="mt-3 bg-gray-50 border border-gray-200 rounded-lg p-3">
               <div className="flex justify-between gap-2 text-base font-black text-gray-900">
-                <span>{saldoTrasPagoUsd < -0.005 ? 'Queda a su favor' : 'Saldo despues del pago'}</span>
-                <span>ARS $ {fmt(Math.round(Math.abs(saldoTrasPagoUsd) * cot))}</span>
+                <span>{aFavor(saldoTrasPagoArs) ? 'Queda a su favor' : 'Saldo despues del pago'}</span>
+                <span>ARS $ {fmt(Math.round(Math.abs(saldoTrasPagoArs)))}</span>
               </div>
               <p className="text-[11px] font-medium text-gray-500 mt-1">
-                {saldoCubierto(saldoTrasPagoUsd) && grupoPago.unidades > 0
+                {saldoCubierto(saldoTrasPagoArs) && grupoPago.unidades > 0
                   ? 'Con este pago el saldo queda cubierto: sus equipos pasan al historial de ventas' +
-                    (saldoTrasPagoUsd < -0.005 ? ' y lo que sobra le queda a favor.' : '.')
+                    (aFavor(saldoTrasPagoArs) ? ' y lo que sobra le queda a favor.' : '.')
                   : 'El pago se guarda con la cotizacion de hoy.'}
               </p>
             </div>
@@ -4064,9 +4205,9 @@ function Admin() {
                 <Fragment>
                   <div className="flex justify-between gap-2 text-xs font-semibold text-gray-600">
                     <span>Valor de {cantidadResolucion} unidad(es)</span>
-                    <span>ARS $ {fmt(Math.round(valorResolucionUsd * cot))}</span>
+                    <span>ARS $ {fmt(Math.round(valorResolucionArs))}</span>
                   </div>
-                  {aplicaCreditoUsd > 0.005 && (
+                  {aplicaCreditoArs >= MEDIO_PESO && (
                     <div className="flex justify-between gap-2 mt-0.5 text-xs font-semibold text-gray-600">
                       <span>Ya entregado a cuenta</span>
                       <span>- ARS $ {fmt(Math.round(aplicaCreditoArs))}</span>
@@ -4078,14 +4219,14 @@ function Admin() {
                   </div>
                   <p className="text-[11px] font-medium text-gray-500 mt-2">
                     Pasa al historial de ventas con la fecha de hoy, al precio acordado.
-                    {aplicaCreditoUsd > 0.005 ? ' Lo que ya entrego a cuenta se descuenta de este pago.' : ''}
+                    {aplicaCreditoArs >= MEDIO_PESO ? ' Lo que ya entrego a cuenta se descuenta de este pago.' : ''}
                   </p>
                 </Fragment>
               ) : (
                 <Fragment>
                   <div className="flex justify-between gap-2 text-base font-black text-gray-800">
                     <span>Deja de deber ({cantidadResolucion} u.)</span>
-                    <span>ARS $ {fmt(Math.round(valorResolucionUsd * cot))}</span>
+                    <span>ARS $ {fmt(Math.round(valorResolucionArs))}</span>
                   </div>
                   <p className="text-[11px] font-medium text-gray-500 mt-2">
                     {CUENTAS[resolucion.lote.cuenta].notaDevolucion}
@@ -4143,13 +4284,13 @@ function Admin() {
 
             <div className="mt-3 bg-gray-50 border border-gray-200 rounded-lg p-3">
               <div className="flex justify-between gap-2 text-base font-black text-gray-900">
-                <span>{saldoTrasEdicionUsd < -0.005 ? 'Queda a su favor' : 'Saldo despues de corregir'}</span>
-                <span>ARS $ {fmt(Math.round(Math.abs(saldoTrasEdicionUsd) * cot))}</span>
+                <span>{aFavor(saldoTrasEdicionArs) ? 'Queda a su favor' : 'Saldo despues de corregir'}</span>
+                <span>ARS $ {fmt(Math.round(Math.abs(saldoTrasEdicionArs)))}</span>
               </div>
               <p className="text-[11px] font-medium text-gray-500 mt-1">
-                {saldoCubierto(saldoTrasEdicionUsd) && grupoEdicionPago.unidades > 0
+                {saldoCubierto(saldoTrasEdicionArs) && grupoEdicionPago.unidades > 0
                   ? 'Con este monto el saldo queda cubierto: sus equipos pasan al historial de ventas' +
-                    (saldoTrasEdicionUsd < -0.005 ? ' y lo que sobra le queda a favor.' : '.')
+                    (aFavor(saldoTrasEdicionArs) ? ' y lo que sobra le queda a favor.' : '.')
                   : 'Se mantiene la cotizacion del dia del pago ($ ' + fmt(cotEdicionPago) + ').'}
               </p>
             </div>
@@ -4207,6 +4348,75 @@ function Admin() {
 
             <div className="flex gap-3 mt-4">
               <button type="button" onClick={() => setEdicionVenta(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
+                Cancelar
+              </button>
+              <button type="submit" disabled={guardando} className="disabled:opacity-60 flex-1 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition">
+                Guardar
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* MODAL: CORREGIR EL PRECIO DE UN EQUIPO DE UNA CUENTA (REVENDEDOR O SENA) */}
+      {edicionPrecioCuenta && (
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <form
+            onSubmit={conBloqueo(guardarPrecioCuenta)}
+            autoComplete="off"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto"
+          >
+            <h2 className="text-xl font-bold text-gray-800">Cambiar precio</h2>
+            <p className="text-sm font-semibold text-gray-600 mt-1 break-words">
+              {edicionPrecioCuenta.lote.revendedor}: {nombreItem(edicionPrecioCuenta.lote, edicionPrecioCuenta.lote.tabla)}
+            </p>
+
+            <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">
+              Precio{edicionPrecioCuenta.lote.cantidad > 1 ? ' por unidad' : ''} (pesos ARS)
+            </label>
+            <InputPesos
+              required
+              autoFocus
+              value={edicionPrecioCuenta.precio}
+              onChange={(precio) => setEdicionPrecioCuenta({ ...edicionPrecioCuenta, precio })}
+              className={claseInputModal + ' font-bold'}
+            />
+
+            {edicionPrecioCuenta.lote.cantidad > 1 && (
+              <Fragment>
+                <label className="text-xs font-bold text-gray-600 mt-3 mb-1 block">
+                  A cuantas unidades? (son {edicionPrecioCuenta.lote.cantidad})
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max={edicionPrecioCuenta.lote.cantidad}
+                  value={edicionPrecioCuenta.cantidad}
+                  onChange={(e) => setEdicionPrecioCuenta({ ...edicionPrecioCuenta, cantidad: e.target.value })}
+                  className={claseInputModal + ' font-bold'}
+                />
+              </Fragment>
+            )}
+
+            <div className="mt-3 bg-gray-50 border border-gray-200 rounded-lg p-3">
+              <div className="flex justify-between gap-2 text-xs font-semibold text-gray-600">
+                <span>Precio anterior</span>
+                <span>ARS $ {fmt(Math.round(edicionPrecioCuenta.lote.precioUnidadArs))}{edicionPrecioCuenta.lote.cantidad > 1 ? ' c/u' : ''}</span>
+              </div>
+              {grupoPrecioCuenta && (
+                <div className="flex justify-between gap-2 mt-1 text-base font-black text-gray-800">
+                  <span>{aFavor(saldoTrasPrecioArs) ? 'Queda a su favor' : 'Saldo despues del cambio'}</span>
+                  <span>ARS $ {fmt(Math.round(Math.abs(saldoTrasPrecioArs)))}</span>
+                </div>
+              )}
+              <p className="text-[11px] font-medium text-gray-500 mt-2">
+                Cambia solo lo que debe por este equipo. El precio del stock y lo que ya entrego no cambian, y el precio queda fijo en
+                pesos aunque cambie el dolar.
+              </p>
+            </div>
+
+            <div className="flex gap-3 mt-4">
+              <button type="button" onClick={() => setEdicionPrecioCuenta(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
                 Cancelar
               </button>
               <button type="submit" disabled={guardando} className="disabled:opacity-60 flex-1 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition">
