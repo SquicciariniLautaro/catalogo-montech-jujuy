@@ -1,7 +1,7 @@
 // Pruebas de las cuentas de Ventas: npm run probar
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { contabilizar } from '../src/contabilidad.js';
+import { contabilizar, calcularMargenes } from '../src/contabilidad.js';
 
 const COT = 1500;
 const usd = (ars) => ars / COT;
@@ -198,4 +198,44 @@ test('precio fijo en pesos con plata de mas: lo que sobra queda sin usar', () =>
   const cobro = movs.find((m) => m.id === 'pago-revendedor-1');
   cerca(cobro.pendiente_usd, 100000 / 1600, 'quedan 100 mil (en dolares de ese pago) a su favor');
   cerca(totalArs(movs), 600000, 'entraron 600 mil');
+});
+
+// Audio del 27/10: ver el porcentaje de ganancia promedio de lo que se vende
+const vendido = (precio, ganancia, extra = {}) => ({ categoria: 'celular', precio_usd: precio, ganancia_total_usd: ganancia, ...extra });
+
+test('margen promedio: ganancia total sobre venta total, y el promedio simple de cada venta', () => {
+  // Una vende 100 y gana 8 (8%), otra 100 y gana 10 (10%), otra 200 y gana 30 (15%)
+  const m = calcularMargenes([vendido(100, 8), vendido(100, 10), vendido(200, 30)]);
+  cerca(m.promedio, 48 / 400, 'de cada peso vendido, 12 centavos son ganancia');
+  cerca(m.simple, (0.08 + 0.1 + 0.15) / 3, 'el promedio de los tres porcentajes');
+  assert.equal(m.unidades, 3);
+});
+
+test('margen promedio: los cobros a cuenta y las ventas sin precio no entran', () => {
+  const m = calcularMargenes([vendido(100, 10), { categoria: 'cobro', cobrado_usd: 500, ganancia_usd: 50 }, vendido(0, 0)]);
+  cerca(m.promedio, 0.1, 'solo la venta con precio');
+  assert.equal(m.unidades, 1);
+  assert.equal(calcularMargenes([]).promedio, null, 'sin ventas no hay promedio');
+});
+
+test('margen promedio: por grupo, y una venta con perdida baja el promedio', () => {
+  const m = calcularMargenes(
+    [vendido(100, 20, { modelo: '13' }), vendido(100, -10, { modelo: '14' }), vendido(300, 30, { modelo: '13' })],
+    (v) => v.modelo
+  );
+  cerca(m.promedio, 40 / 500, 'la perdida resta');
+  const trece = m.grupos.find((g) => g.nombre === '13');
+  cerca(trece.margen, 50 / 400, 'margen del 13');
+  cerca(m.grupos.find((g) => g.nombre === '14').margen, -0.1, 'el 14 dio perdida');
+});
+
+test('margen promedio: no cambia la plata ni la ganancia de Ventas', () => {
+  const pagos = [pago(1, 300000, '2026-10-05T12:00:00Z', { aplicado: true }), pago(2, 460000, '2026-10-21T22:00:00Z', { aplicado: true })];
+  const ventas = [venta(10, 760000, 600000, '2026-10-21T22:00:01Z', deCuenta)];
+  const movs = contar(ventas, pagos);
+  const antes = JSON.stringify(movs);
+  const m = calcularMargenes(movs);
+  assert.equal(JSON.stringify(movs), antes, 'los movimientos quedan iguales');
+  cerca(m.promedio, 160000 / 760000, 'el equipo cuenta entero aunque se haya pagado en partes');
+  assert.equal(m.unidades, 1, 'los pagos a cuenta no son ventas');
 });

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, Fragment } from 'react';
 import { supabase } from './supabase';
 import toast from 'react-hot-toast';
 import FirmaLambda from './FirmaLambda';
-import { contabilizar } from './contabilidad';
+import { contabilizar, calcularMargenes } from './contabilidad';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 
 const COLORES = [
@@ -2797,6 +2797,36 @@ function Admin() {
   const totalGrafico = datosGrafico.reduce((acc, d) => acc + d.Ganancia, 0);
   const totalTorta = datosGrafico.reduce((acc, d) => acc + d.valor, 0);
 
+  // Margen promedio de lo vendido en el periodo elegido. Solo para mirar: no cambia ninguna cuenta.
+  // Igual que la torta: con "Historico total", por mes (ultimos 6); con un mes elegido, por modelo
+  // o tipo de accesorio (los 5 que mas vendieron y el resto en "Otros").
+  const mesesMargen = mesesDisponibles.slice(0, 6);
+  const margenes = calcularMargenes(
+    ventasFiltradas,
+    graficoPorMes
+      ? (v) => (mesesMargen.includes(obtenerMesAnio(v.fecha_venta)) ? obtenerMesAnio(v.fecha_venta) : null)
+      : (v) => String((v.categoria === 'celular' ? v.modelo : v.tipo) || 'Sin nombre').trim()
+  );
+  const barrasMargen = (() => {
+    if (graficoPorMes) {
+      return [...mesesMargen]
+        .reverse()
+        .map((mes) => margenes.grupos.find((g) => g.nombre === mes))
+        .filter(Boolean)
+        .map((g) => ({ ...g, etiqueta: formatearNombreMes(g.nombre) }));
+    }
+    const porVenta = [...margenes.grupos].sort((a, b) => b.ventaUsd - a.ventaUsd).map((g) => ({ ...g, etiqueta: g.nombre }));
+    if (porVenta.length <= 6) return porVenta;
+    const resto = porVenta.slice(5).reduce(
+      (acc, g) => ({ ...acc, unidades: acc.unidades + g.unidades, ventaUsd: acc.ventaUsd + g.ventaUsd, gananciaUsd: acc.gananciaUsd + g.gananciaUsd }),
+      { nombre: 'Otros', etiqueta: 'Otros', unidades: 0, ventaUsd: 0, gananciaUsd: 0 }
+    );
+    return [...porVenta.slice(0, 5), { ...resto, margen: resto.gananciaUsd / resto.ventaUsd }];
+  })();
+  const maxMargen = barrasMargen.reduce((acc, b) => Math.max(acc, Math.abs(b.margen)), 0);
+  const porcentaje = (m) => (m === null ? '-' : fmt(Math.round(m * 1000) / 10) + '%');
+  const hayColumnaGraficos = datosGrafico.length > 0 || margenes.promedio !== null;
+
   if (cargando) {
     return <div className="min-h-screen flex items-center justify-center font-bold text-gray-500 bg-gray-50">Cargando...</div>;
   }
@@ -3585,6 +3615,8 @@ function Admin() {
           )}
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+            {hayColumnaGraficos && (
+            <div className="min-w-0 space-y-4">
             {datosGrafico.length > 0 && (
               <div className="min-w-0 bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200">
                 <h3 className="text-xs md:text-sm font-bold text-gray-500 mb-3 uppercase tracking-wider text-center">
@@ -3637,10 +3669,60 @@ function Admin() {
               </div>
             )}
 
+            {/* MARGEN PROMEDIO: que parte de lo vendido fue ganancia (solo informativo) */}
+            {margenes.promedio !== null && (
+              <div className="min-w-0 bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200">
+                <h3 className="text-xs md:text-sm font-bold text-gray-500 uppercase tracking-wider text-center">
+                  Margen promedio {graficoPorMes ? '(historico total)' : 'de ' + formatearNombreMes(mesSeleccionado)}
+                </h3>
+                <p className={'mt-2 text-center text-4xl font-black ' + (margenes.promedio < 0 ? 'text-red-600' : 'text-gray-900')}>
+                  {porcentaje(margenes.promedio)}
+                </p>
+                <p className="mt-1 text-center text-xs font-semibold text-gray-600">
+                  De cada $ 100 que vendiste, $ {fmt(Math.round(margenes.promedio * 1000) / 10)} fueron ganancia
+                </p>
+                <p className="mt-0.5 text-center text-[11px] font-medium text-gray-400">
+                  {margenes.unidades} venta(s). Promedio de los porcentajes de cada venta: {porcentaje(margenes.simple)}
+                </p>
+                {barrasMargen.length > 0 && (
+                  <Fragment>
+                    <p className="mt-4 text-[11px] font-bold text-gray-500 uppercase tracking-wide">
+                      {graficoPorMes ? 'Por mes (ultimos 6)' : 'Por modelo (los que mas vendiste)'}
+                    </p>
+                    <ul className="mt-2 space-y-2.5">
+                      {barrasMargen.map((b) => (
+                        <li key={b.nombre} title={'Vendido: USD ' + fmt(redondear(b.ventaUsd)) + ' - Ganancia: USD ' + fmt(redondear(b.gananciaUsd))}>
+                          <div className="flex justify-between gap-2 text-xs">
+                            <span className="min-w-0 break-words font-semibold text-gray-700">{b.etiqueta}</span>
+                            <span className="font-bold text-gray-900 whitespace-nowrap">
+                              {porcentaje(b.margen)} <span className="font-semibold text-gray-400">({b.unidades} u.)</span>
+                            </span>
+                          </div>
+                          <div className="mt-1 h-2 rounded bg-gray-100 overflow-hidden">
+                            <div
+                              className={'h-full rounded ' + (b.margen < 0 ? 'bg-red-500' : 'bg-green-500')}
+                              style={{ width: (maxMargen > 0 ? (Math.abs(b.margen) / maxMargen) * 100 : 0) + '%' }}
+                            />
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </Fragment>
+                )}
+                <p className="text-[10px] text-gray-400 mt-3">
+                  Margen = ganancia del equipo sobre su precio de venta. Cada equipo cuenta entero el dia en que se vendio, aunque lo hayan
+                  pagado en partes; los cobros a cuenta que todavia no pagaron un equipo no entran. Es solo informativo: no cambia ningun
+                  total.
+                </p>
+              </div>
+            )}
+            </div>
+            )}
+
             <div
               className={
                 'min-w-0 bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex flex-col ' +
-                (datosGrafico.length > 0 ? 'lg:col-span-2' : 'lg:col-span-3')
+                (hayColumnaGraficos ? 'lg:col-span-2' : 'lg:col-span-3')
               }
             >
               <div className="flex-grow grid grid-cols-1 sm:grid-cols-2 gap-px bg-gray-100 content-start">
