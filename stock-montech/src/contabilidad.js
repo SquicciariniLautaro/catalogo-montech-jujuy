@@ -209,3 +209,45 @@ export function contabilizar({ ventas, pagos, cuentaDeVenta, claveNombre, gananc
   });
   return movimientos;
 }
+
+// Margen de ganancia de lo vendido: que parte de cada venta es ganancia. Solo lee las ventas, no
+// mueve plata ni ganancia. Cada equipo cuenta entero el dia en que se vendio (su precio y la
+// ganancia del equipo), aunque se haya pagado en partes. Los cobros a cuenta no son ventas y no
+// entran; tampoco las ventas sin precio.
+//
+// ventas: movimientos de contabilizar (usa precio_usd, ganancia_total_usd y categoria).
+// grupoDe(v): nombre del grupo de la venta (modelo, mes...), o null para no agruparla.
+//
+// Devuelve promedio (ganancia total / venta total: de cada peso vendido, cuanto es ganancia),
+// simple (el promedio de los porcentajes de cada venta, todas pesan igual), unidades, ventaUsd,
+// gananciaUsd y grupos [{ nombre, unidades, ventaUsd, gananciaUsd, margen }] en el orden en que
+// aparecen. promedio y simple son null si no hay ventas.
+export function calcularMargenes(ventas, grupoDe = () => null) {
+  const vendidas = ventas.filter((v) => v.categoria !== 'cobro' && Number(v.precio_usd) > 0);
+  const grupos = new Map();
+  let ventaUsd = 0;
+  let gananciaUsd = 0;
+  let sumaMargenes = 0;
+  vendidas.forEach((v) => {
+    const precio = Number(v.precio_usd);
+    const ganancia = Number(v.ganancia_total_usd) || 0;
+    ventaUsd += precio;
+    gananciaUsd += ganancia;
+    sumaMargenes += ganancia / precio;
+    const nombre = grupoDe(v);
+    if (nombre === null || nombre === undefined) return;
+    if (!grupos.has(nombre)) grupos.set(nombre, { nombre, unidades: 0, ventaUsd: 0, gananciaUsd: 0 });
+    const g = grupos.get(nombre);
+    g.unidades += 1;
+    g.ventaUsd += precio;
+    g.gananciaUsd += ganancia;
+  });
+  return {
+    promedio: ventaUsd > 0 ? gananciaUsd / ventaUsd : null,
+    simple: vendidas.length > 0 ? sumaMargenes / vendidas.length : null,
+    unidades: vendidas.length,
+    ventaUsd,
+    gananciaUsd,
+    grupos: [...grupos.values()].map((g) => ({ ...g, margen: g.gananciaUsd / g.ventaUsd })),
+  };
+}
