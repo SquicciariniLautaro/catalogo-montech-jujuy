@@ -3,6 +3,7 @@ import { supabase } from './supabase';
 import toast from 'react-hot-toast';
 import FirmaLambda from './FirmaLambda';
 import { contabilizar, calcularMargenes } from './contabilidad';
+import { numeroWhatsApp, numeroWhatsAppLegible, mensajeCuenta, enlaceWhatsApp } from './whatsapp';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 
 const COLORES = [
@@ -907,6 +908,7 @@ function Admin() {
   const [pagosSena, setPagosSena] = useState([]); // lo entregado por las senas, todavia no aplicado
   const [historialPagos, setHistorialPagos] = useState([]); // todos los pagos de las dos cuentas, con su cuenta
   const [controlCajaAbierto, setControlCajaAbierto] = useState(false);
+  const [diaCajaAbierto, setDiaCajaAbierto] = useState(null); // dia desplegado en Control de caja ('aaaa-mm-dd')
   const [pagoRevendedor, setPagoRevendedor] = useState(null); // { cuenta, nombre, monto (ARS) }
   const [edicionPago, setEdicionPago] = useState(null); // { cuenta, nombre, pago, monto (ARS) }
   const [edicionVenta, setEdicionVenta] = useState(null); // { item, precio (ARS por unidad) }
@@ -1604,6 +1606,28 @@ function Admin() {
   // Las senas no usan lista guardada: la cuenta existe mientras haya equipos senados o plata entregada
   const gruposSena = armarGrupos('sena', enSena, pagosSena, []);
   const gruposDe = (cuenta) => (cuenta === 'sena' ? gruposSena : gruposRevendedor);
+
+  // Enlace de WhatsApp con el resumen de la cuenta de un revendedor: equipos, precios y saldo
+  const enlaceCuentaWhatsApp = (g) =>
+    enlaceWhatsApp(
+      numeroWhatsApp(g.celular),
+      mensajeCuenta({
+        nombre: g.nombre,
+        items: g.lotes.map((lote) => ({
+          descripcion:
+            (lote.tabla === 'celulares'
+              ? lote.modelo + ' ' + (lote.capacidad || '') + (lote.color ? ' ' + lote.color : '') + ' (bat. ' + lote.bateria + '%)'
+              : lote.tipo + ' - ' + lote.modelo + (lote.color ? ' ' + lote.color : '')
+            ).replace(/\s+/g, ' '),
+          cantidad: lote.cantidad,
+          precioUnidadArs: lote.precioUnidadArs,
+          precioTotalArs: lote.precioTotalArs,
+        })),
+        totalArs: g.totalArs,
+        creditoArs: Math.max(0, g.creditoArs),
+        saldoArs: g.saldoArs,
+      })
+    );
 
   // Pestana Ventas: cada peso cuenta una sola vez, el dia en que entro (ver contabilidad.js).
   // Los pagos a cuenta de revendedores y senas suman el dia del pago; el equipo que despues se
@@ -2671,12 +2695,16 @@ function Admin() {
     const i = v.categoria === 'cobro' ? (v.cuenta === 'sena' ? 2 : 1) : v.cuenta_origen ? 3 : 0;
     desgloseCaja[i].ars += v.cobrado_ars;
   });
+  const claveDia = (iso) => {
+    const f = new Date(iso);
+    return f.getFullYear() + '-' + String(f.getMonth() + 1).padStart(2, '0') + '-' + String(f.getDate()).padStart(2, '0');
+  };
   const cajaPorDia = (() => {
     const dias = new Map();
     ventasFiltradas.forEach((v) => {
       if (!v.fecha_venta) return;
       const f = new Date(v.fecha_venta);
-      const clave = f.getFullYear() + '-' + String(f.getMonth() + 1).padStart(2, '0') + '-' + String(f.getDate()).padStart(2, '0');
+      const clave = claveDia(v.fecha_venta);
       const dia = dias.get(clave) || { clave, texto: f.toLocaleDateString('es-AR'), ars: 0, movimientos: 0 };
       dia.ars += v.cobrado_ars;
       dia.movimientos += 1;
@@ -2740,6 +2768,34 @@ function Admin() {
     });
     return [...grupos.values()];
   })();
+
+  // Control de caja, detalle de cada dia: una operacion por venta (el celular con los accesorios
+  // que se vendieron junto, que se guardan con el mismo momento) o por pago a cuenta, con lo que
+  // entro. Las operaciones de un dia suman lo mismo que ese dia en "Dia por dia".
+  const operacionesPorDia = (() => {
+    const dias = new Map();
+    ventasAgrupadas.forEach((v) => {
+      if (!v.fecha_venta) return;
+      const dia = claveDia(v.fecha_venta);
+      if (!dias.has(dia)) dias.set(dia, new Map());
+      const ops = dias.get(dia);
+      const clave = v.categoria === 'cobro' ? 'cobro|' + v.claveGrupo : v.fecha_venta;
+      if (!ops.has(clave)) ops.set(clave, { clave, fecha: v.fecha_venta, items: [], ars: 0 });
+      const op = ops.get(clave);
+      op.items.push(v);
+      op.ars += v.cobrado_ars;
+    });
+    const porDia = {};
+    dias.forEach((ops, dia) => {
+      porDia[dia] = [...ops.values()].sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+    });
+    return porDia;
+  })();
+  const descripcionVenta = (v) =>
+    (v.cantidad > 1 ? v.cantidad + ' x ' : '') +
+    (v.categoria === 'celular' ? v.modelo + ' ' + (v.capacidad || '') : v.tipo + ' - ' + v.modelo) +
+    (v.color ? ' ' + v.color : '');
+  const horaDe = (iso) => new Date(iso).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 
   const ventasPorPagina = esEscritorio ? VENTAS_POR_PAGINA : 5;
   const totalPaginas = Math.ceil(ventasAgrupadas.length / ventasPorPagina);
@@ -3262,6 +3318,11 @@ function Admin() {
                     <a href={'tel:' + g.celular.replace(/[^\d+]/g, '')} className="font-bold text-blue-600 hover:underline">
                       {g.celular}
                     </a>
+                    {!numeroWhatsApp(g.celular) && (
+                      <span className="block mt-0.5 text-[11px] font-medium text-amber-700">
+                        No se reconoce como numero de WhatsApp: corregilo en Editar datos (con codigo de area, ej: 388 5123456).
+                      </span>
+                    )}
                   </div>
                 )}
                 {tieneMovimientos(g) && (
@@ -3341,6 +3402,16 @@ function Admin() {
                   )}
                   {cuentaTab === 'revendedor' && (
                     <Fragment>
+                      {/* Abre el chat del revendedor con el resumen ya escrito (sin celular, WhatsApp deja elegir el chat) */}
+                      <a
+                        href={enlaceCuentaWhatsApp(g)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={numeroWhatsApp(g.celular) ? 'Abre su chat con el resumen de la cuenta' : 'No tiene celular cargado: WhatsApp te deja elegir el chat'}
+                        className="basis-full md:basis-auto text-center bg-[#25D366] text-white px-3 py-2.5 md:py-1.5 rounded-lg text-xs font-bold hover:bg-[#1ebe5b] transition"
+                      >
+                        Enviar cuenta por WhatsApp
+                      </a>
                       <button
                         type="button"
                         onClick={() => abrirEdicionRevendedor(g)}
@@ -3595,19 +3666,107 @@ function Admin() {
 
                   <div>
                     <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">Dia por dia</p>
-                    <ul className="divide-y divide-gray-100 text-sm max-h-80 overflow-y-auto">
-                      {cajaPorDia.map((d) => (
-                        <li key={d.clave} className="py-1.5 flex justify-between gap-3">
-                          <span className="font-semibold text-gray-600">
-                            {d.texto} <span className="text-[11px] font-medium text-gray-400">({d.movimientos} mov.)</span>
-                          </span>
-                          <span className="font-bold text-gray-900 whitespace-nowrap">ARS $ {fmt(Math.round(d.ars))}</span>
-                        </li>
-                      ))}
-                    </ul>
-                    <p className="text-[10px] text-gray-400 mt-1">
-                      Si un dia no coincide con lo que anotaste, toca ese mes arriba y busca los movimientos de ese dia en el historial.
+                    <p className="text-[11px] font-medium text-gray-500 mb-1">
+                      Toca un dia para ver que se vendio: cada venta con su total (el celular junto con sus accesorios) y para corregirla ahi mismo.
                     </p>
+                    <ul className={'divide-y divide-gray-100 text-sm' + (mesSeleccionado === 'todos' ? ' max-h-[36rem] overflow-y-auto' : '')}>
+                      {cajaPorDia.map((d) => {
+                        const abierto = diaCajaAbierto === d.clave;
+                        const operaciones = operacionesPorDia[d.clave] || [];
+                        return (
+                          <li key={d.clave}>
+                            <button
+                              type="button"
+                              onClick={() => setDiaCajaAbierto(abierto ? null : d.clave)}
+                              aria-expanded={abierto}
+                              className={'w-full py-2 flex items-center gap-2 text-left rounded hover:bg-gray-50 transition' + (abierto ? ' bg-gray-50' : '')}
+                            >
+                              <span className="flex-1 min-w-0 font-semibold text-gray-600">
+                                {d.texto} <span className="text-[11px] font-medium text-gray-400">({d.movimientos} mov.)</span>
+                              </span>
+                              <span className="font-bold text-gray-900 whitespace-nowrap">ARS $ {fmt(Math.round(d.ars))}</span>
+                              <IconoFlecha abierto={abierto} />
+                            </button>
+                            {abierto && (
+                              <ul className="mb-2 rounded-lg border border-gray-200 divide-y divide-gray-100 bg-white">
+                                {operaciones.map((op) => {
+                                  const cobro = op.items[0].categoria === 'cobro';
+                                  const origen = cobro ? null : op.items.map(origenDeVenta).find(Boolean);
+                                  return (
+                                    <li key={op.clave} className="px-3 py-2">
+                                      <div className="flex items-start justify-between gap-3">
+                                        <span className="min-w-0">
+                                          <span className="block text-[11px] font-semibold text-gray-400">
+                                            {horaDe(op.fecha)}
+                                            {cobro
+                                              ? ' - ' + CUENTAS[op.items[0].cuenta].cobro
+                                              : op.items.length > 1
+                                              ? ' - Venta de ' + op.items.length + ' productos'
+                                              : ''}
+                                            {origen ? ' - ' + textoOrigen(origen) : ''}
+                                          </span>
+                                          <span className="block font-bold text-gray-900 break-words leading-tight">
+                                            {cobro ? op.items[0].revendedor : op.items.map(descripcionVenta).join(' + ')}
+                                          </span>
+                                        </span>
+                                        <span className="shrink-0 text-right">
+                                          <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wide leading-none">
+                                            {op.items.length > 1 ? 'Total' : 'Entro'}
+                                          </span>
+                                          <span className="block font-black text-gray-900 whitespace-nowrap">ARS $ {fmt(Math.round(op.ars))}</span>
+                                        </span>
+                                      </div>
+                                      <ul className="mt-1 space-y-0.5">
+                                        {op.items.map((item) => {
+                                          const cubierto = !cobro && item.cubierto_usd > 0.005;
+                                          return (
+                                            <li key={item.claveGrupo} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs">
+                                              {op.items.length > 1 && (
+                                                <span className="flex-1 min-w-0 font-medium text-gray-600 break-words">
+                                                  {descripcionVenta(item)}: <span className="font-bold text-gray-800">ARS $ {fmt(Math.round(item.cobrado_ars))}</span>
+                                                </span>
+                                              )}
+                                              {(cubierto || permutaDe(item) > 0) && (
+                                                <span className="basis-full text-[11px] font-medium text-gray-500">
+                                                  {cubierto
+                                                    ? 'Precio ARS $ ' + fmt(Math.round(precioUnidadArsDe(item) * item.cantidad)) +
+                                                      ', ya cobrado antes a cuenta ARS $ ' + fmt(Math.round(item.cubierto_ars))
+                                                    : 'Mas un equipo tomado en permuta por ARS $ ' + fmt(Math.round(permutaDe(item) * cotizacionDe(item)))}
+                                                </span>
+                                              )}
+                                              <span className={'flex gap-3 font-bold' + (op.items.length > 1 ? '' : ' ml-auto')}>
+                                                {cobro ? (
+                                                  <button type="button" onClick={() => verPagosDe(item)} className="text-blue-600 hover:underline py-1">
+                                                    Ver pagos
+                                                  </button>
+                                                ) : (
+                                                  <Fragment>
+                                                    <button type="button" onClick={() => abrirEdicionVenta(item)} className="text-blue-600 hover:underline py-1">
+                                                      Editar
+                                                    </button>
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => confirmarAnulacion(item)}
+                                                      className="text-gray-400 hover:text-red-500 hover:underline py-1"
+                                                    >
+                                                      Anular
+                                                    </button>
+                                                  </Fragment>
+                                                )}
+                                              </span>
+                                            </li>
+                                          );
+                                        })}
+                                      </ul>
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
                   </div>
                 </div>
               )}
@@ -4050,7 +4209,13 @@ function Admin() {
                   placeholder="Ej: 388 5123456"
                   className={claseInputModal}
                 />
-                <p className="text-[11px] font-medium text-gray-500 mt-1">Es un revendedor nuevo: queda guardado en la lista.</p>
+                <p className="text-[11px] font-medium text-gray-500 mt-1">
+                  Es un revendedor nuevo: queda guardado en la lista.
+                  {carritoCelular.trim() &&
+                    (numeroWhatsApp(carritoCelular)
+                      ? ' WhatsApp: ' + numeroWhatsAppLegible(numeroWhatsApp(carritoCelular))
+                      : ' Ese celular no se reconoce para WhatsApp: cargalo con codigo de area, ej: 388 5123456')}
+                </p>
               </Fragment>
             )}
 
@@ -4547,6 +4712,13 @@ function Admin() {
               placeholder="Ej: 388 5123456"
               className={claseInputModal}
             />
+            {revForm.celular.trim() && (
+              <p className={'text-[11px] font-medium mt-1 ' + (numeroWhatsApp(revForm.celular) ? 'text-green-700' : 'text-amber-700')}>
+                {numeroWhatsApp(revForm.celular)
+                  ? 'WhatsApp: ' + numeroWhatsAppLegible(numeroWhatsApp(revForm.celular))
+                  : 'No se reconoce como numero de WhatsApp. Cargalo con codigo de area, ej: 388 5123456'}
+              </p>
+            )}
 
             <div className="flex gap-3 mt-4">
               <button type="button" onClick={() => setRevForm(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
