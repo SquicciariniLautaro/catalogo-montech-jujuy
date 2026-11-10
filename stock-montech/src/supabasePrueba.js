@@ -74,6 +74,14 @@ const tablas = {
     { id: 4, nombre: 'Pedro', clave: 'PEDRO', celular: null },
   ],
   catalogo_config: [],
+  // Intereses de las cuotas con tarjeta (los del Excel del local)
+  planes_tarjeta: [
+    { cuotas: 1, interes: 15, visible: false },
+    { cuotas: 3, interes: 20, visible: true },
+    { cuotas: 6, interes: 27, visible: true },
+    { cuotas: 9, interes: 46, visible: true },
+    { cuotas: 12, interes: 57, visible: true },
+  ],
   // Mensualidad del sistema. Para probar las etapas del aviso: ?vence=AAAA-MM-DD en la direccion
   estado_servicio: [{
     id: 1, vence: new URLSearchParams(globalThis.location?.search).get('vence') || '2026-11-13', monto: 50000,
