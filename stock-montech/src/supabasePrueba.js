@@ -74,6 +74,12 @@ const tablas = {
     { id: 4, nombre: 'Pedro', clave: 'PEDRO', celular: null },
   ],
   catalogo_config: [],
+  // Mensualidad del sistema. Para probar las etapas del aviso: ?vence=AAAA-MM-DD en la direccion
+  estado_servicio: [{
+    id: 1, vence: new URLSearchParams(globalThis.location?.search).get('vence') || '2026-11-13', monto: 50000,
+    recargo_diario: 10000, dias_aviso: 5, dias_gracia: 7, cbu: '0000000000000000000000', alias: 'ALIAS.DE.PRUEBA',
+    cuenta: 'Caja de ahorro en pesos 0000000000', titular: 'Titular de prueba', cuil: '20000000000', banco: 'Banco de prueba',
+  }],
 };
 const proximoId = {};
 Object.entries(tablas).forEach(([t, filas]) => (proximoId[t] = filas.reduce((m, f) => Math.max(m, f.id || 0), 0) + 1));

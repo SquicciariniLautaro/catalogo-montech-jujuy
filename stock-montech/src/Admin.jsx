@@ -2,9 +2,13 @@ import { useState, useEffect, useRef, Fragment } from 'react';
 import { supabase } from './supabase';
 import toast from 'react-hot-toast';
 import FirmaLambda from './FirmaLambda';
+import AvisoPago from './AvisoPago';
 import { contabilizar, calcularMargenes } from './contabilidad';
+import { estadoDelServicio, hoyArgentina, instalarSoloLectura, ponerSoloLectura, MENSAJE_SOLO_LECTURA } from './servicio';
 import { numeroWhatsApp, numeroWhatsAppLegible, mensajeCuenta, enlaceWhatsApp } from './whatsapp';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
+
+instalarSoloLectura(supabase);
 
 const COLORES = [
   'Negro',
@@ -858,6 +862,9 @@ function AccionesEdicion({ cantidad, valor, onChange, onGuardar, onCancelar }) {
 }
 
 function Admin() {
+  // Mensualidad del sistema: undefined = todavia no se leyo; null = sin vencimiento cargado
+  const [servicio, setServicio] = useState(undefined);
+  const estadoServicio = estadoDelServicio(servicio, hoyArgentina());
   const [cotizacion, setCotizacion] = useState(1250);
   const [cotizacionCosto, setCotizacionCosto] = useState(''); // vacia = la misma que la de venta
   const [activeTab, setActiveTab] = useState('celulares');
@@ -989,6 +996,10 @@ function Admin() {
   // Evita que un doble toque dispare dos veces la misma operacion (por ejemplo, duplicar un ingreso)
   const conBloqueo = (fn) => async (...args) => {
     if (args[0] && typeof args[0].preventDefault === 'function') args[0].preventDefault();
+    if (estadoServicio.soloLectura) {
+      toast.error(MENSAJE_SOLO_LECTURA);
+      return;
+    }
     if (ocupado.current) return;
     ocupado.current = true;
     setGuardando(true);
@@ -1022,7 +1033,13 @@ function Admin() {
   useEffect(() => {
     document.title = 'Montech | Admin';
     cargarDatos(true);
+    // Sin la tabla (o sin su fila) el panel funciona normal
+    supabase.from('estado_servicio').select('*').eq('id', 1).single().then(({ data }) => setServicio(data || null));
   }, []);
+
+  useEffect(() => {
+    ponerSoloLectura(estadoServicio.soloLectura);
+  }, [estadoServicio.soloLectura]);
 
   // Cierra el menu de opciones al hacer scroll o redimensionar
   useEffect(() => {
@@ -2895,6 +2912,8 @@ function Admin() {
 
   return (
     <div className="min-h-screen p-3 md:p-8 text-gray-800 bg-gray-50 overflow-x-hidden">
+      {servicio && <AvisoPago estado={estadoServicio} datos={servicio} />}
+
       {/* HEADER */}
       <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4 max-w-6xl mx-auto mb-6 pb-4 border-b border-gray-200">
         <div>

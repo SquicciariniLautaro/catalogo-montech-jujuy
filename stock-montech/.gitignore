@@ -23,3 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 .env
+
+# Datos de pago de la mensualidad: el repo es publico
+sql/datos-de-pago.sql
