@@ -4,6 +4,7 @@ import toast from 'react-hot-toast';
 import FirmaLambda from './FirmaLambda';
 import AvisoPago from './AvisoPago';
 import { contabilizar, calcularMargenes } from './contabilidad';
+import { armarPlanes, leerPorcentaje, calcularPlan, textoParaCopiar, AVISO_CUOTAS } from './cuotas';
 import { estadoDelServicio, hoyArgentina, instalarSoloLectura, ponerSoloLectura, MENSAJE_SOLO_LECTURA } from './servicio';
 import { numeroWhatsApp, numeroWhatsAppLegible, mensajeCuenta, enlaceWhatsApp } from './whatsapp';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
@@ -856,6 +857,228 @@ function AccionesEdicion({ cantidad, valor, onChange, onGuardar, onCancelar }) {
         <button onClick={onCancelar} className="flex-1 sm:flex-none bg-gray-200 text-gray-700 px-4 py-2.5 sm:py-2 rounded-lg text-sm font-bold hover:bg-gray-300 transition">
           Cancelar
         </button>
+      </div>
+    </div>
+  );
+}
+
+// Pestana Tarjeta: el simulador del Excel (precio a cobrar -> total y valor de cada cuota, con el
+// texto para copiar) y, en la misma tabla, el interes de cada plan y si se muestra en el catalogo.
+// Las cuentas usan lo que esta escrito aunque todavia no se haya guardado.
+// Los porcentajes se editan como texto ("27,5"); la comision vacia = sin cargar
+const aTextoPorcentaje = (n) => (n === null || n === undefined ? '' : String(n).replace('.', ','));
+const planesParaEditar = (filas) =>
+  armarPlanes(filas).map((p) => ({ ...p, interes: aTextoPorcentaje(p.interes), comision: aTextoPorcentaje(p.comision) }));
+const comisionDe = (texto) => (String(texto).trim() === '' ? null : leerPorcentaje(texto));
+const comisionMala = (texto) => {
+  const c = comisionDe(texto);
+  return c !== null && (Number.isNaN(c) || c >= 100);
+};
+const huellaPlanes = (lista) =>
+  JSON.stringify(lista.map((p) => [p.cuotas, leerPorcentaje(p.interes), comisionDe(p.comision), p.visible]));
+
+function PestanaTarjeta({ conBloqueo, guardando }) {
+  const [planes, setPlanes] = useState(null); // [{ cuotas, interes (texto), comision (texto), visible }]
+  const [guardado, setGuardado] = useState(''); // planes tal cual estan en la base, para saber si hay cambios
+  const [faltaTabla, setFaltaTabla] = useState(false);
+  const [precio, setPrecio] = useState('');
+
+  const cargar = (filas) => {
+    const lista = planesParaEditar(filas);
+    setPlanes(lista);
+    setGuardado(huellaPlanes(lista));
+  };
+
+  useEffect(() => {
+    supabase
+      .from('planes_tarjeta')
+      .select('*')
+      .order('cuotas')
+      .then(({ data, error }) => {
+        const lista = planesParaEditar(error ? null : data);
+        setFaltaTabla(Boolean(error));
+        setPlanes(lista);
+        setGuardado(huellaPlanes(lista));
+      });
+  }, []);
+
+  if (!planes) return <p className="text-center p-8 text-gray-500">Cargando...</p>;
+
+  const monto = parseFloat(precio) || 0;
+  const invalidos = planes.filter((p) => Number.isNaN(leerPorcentaje(p.interes)) || comisionMala(p.comision));
+  // Un interes mal escrito no entra en el texto para copiar
+  const planesNumericos = planes.map((p) => ({ ...p, interes: leerPorcentaje(p.interes) || 0, visible: p.visible && !Number.isNaN(leerPorcentaje(p.interes)) }));
+  const hayCambios = huellaPlanes(planes) !== guardado;
+  const cambiar = (cuotas, cambios) => setPlanes(planes.map((p) => (p.cuotas === cuotas ? { ...p, ...cambios } : p)));
+
+  async function guardar() {
+    if (invalidos.length > 0) {
+      toast.error('Revisa los porcentajes de ' + invalidos.map((p) => p.cuotas + ' cuota(s)').join(', '));
+      return;
+    }
+    const filas = planes.map((p) => ({ cuotas: p.cuotas, interes: leerPorcentaje(p.interes), comision: comisionDe(p.comision), visible: p.visible }));
+    const { error } = await supabase.from('planes_tarjeta').upsert(filas, { onConflict: 'cuotas' });
+    if (error) {
+      toast.error(
+        'No se pudieron guardar los porcentajes: ' +
+          (/comision/i.test(error.message) ? 'falta actualizar la base de datos (correr sql/planes-tarjeta.sql de nuevo)' : error.message)
+      );
+      return;
+    }
+    // Se vuelve a leer lo que quedo en la base
+    const { data } = await supabase.from('planes_tarjeta').select('*').order('cuotas');
+    cargar(data || filas);
+    toast.success('Guardado: el catalogo ya usa estos intereses');
+  }
+
+  async function copiar() {
+    const texto = textoParaCopiar(monto, planesNumericos);
+    try {
+      await navigator.clipboard.writeText(texto);
+      toast.success('Texto copiado');
+    } catch {
+      // Navegadores sin permiso para copiar: se muestra para copiarlo a mano
+      window.prompt('Copia el texto:', texto);
+    }
+  }
+
+  return (
+    <div className="space-y-4 md:space-y-6">
+      <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200 space-y-4 max-w-2xl">
+        <div>
+          <h2 className="text-lg font-black text-gray-900">Simulador de cuotas con tarjeta</h2>
+          <p className="text-xs font-medium text-gray-500">
+            Escribi el precio a cobrar y te da el valor de cada cuota, el total y lo que te queda despues de lo que te cobra la
+            tarjeta. Lo que le cobras al cliente y "Mostrar" son lo que ve en el catalogo (pestaña "Con tarjeta"); lo que te cobra
+            la tarjeta y lo que te queda lo ves solo vos. Cambialos y toca Guardar.
+          </p>
+        </div>
+
+        {faltaTabla && (
+          <p className="text-[11px] font-medium text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
+            Falta actualizar la base de datos (correr sql/planes-tarjeta.sql). Mientras tanto se usan los intereses del Excel y los
+            cambios no se pueden guardar (lo que te queda se puede probar igual, sin guardar).
+          </p>
+        )}
+
+        <label className="block max-w-xs text-xs font-bold text-gray-600">
+          Precio a cobrar (ARS)
+          <InputPesos value={precio} onChange={setPrecio} placeholder="Ej: 540.000" className={claseInput + ' mt-1 text-lg font-bold'} />
+        </label>
+
+        <div>
+          <div className="grid grid-cols-[2.5rem_1fr_1fr_3.25rem] gap-x-2 text-[10px] font-bold uppercase tracking-wide text-gray-500 pb-1 border-b border-gray-200 leading-tight">
+            <span>Cuotas</span>
+            <span>Le cobras al cliente %</span>
+            <span>Te cobra la tarjeta %</span>
+            <span className="text-center">Mostrar</span>
+          </div>
+          <ul className="divide-y divide-gray-100">
+            {planes.map((p) => {
+              const interesMalo = Number.isNaN(leerPorcentaje(p.interes));
+              const comMala = comisionMala(p.comision);
+              const c = calcularPlan(monto, { ...p, interes: leerPorcentaje(p.interes) || 0, comision: comMala ? null : comisionDe(p.comision) });
+              const claseInputPorcentaje = (malo, color) =>
+                'w-full min-w-0 border rounded-lg p-1.5 text-base md:text-sm font-bold outline-none focus:bg-white ' +
+                (malo ? 'border-red-400 text-red-600 bg-red-50' : color);
+              return (
+                <li key={p.cuotas} className={'py-2' + (p.visible ? '' : ' text-gray-400')}>
+                  <div className="grid grid-cols-[2.5rem_1fr_1fr_3.25rem] gap-x-2 items-center">
+                    <span className="font-black text-base">{p.cuotas}</span>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={p.interes}
+                      onChange={(e) => cambiar(p.cuotas, { interes: e.target.value })}
+                      aria-label={'Le cobras al cliente en ' + p.cuotas + ' cuota(s), %'}
+                      className={claseInputPorcentaje(interesMalo, 'border-yellow-300 bg-yellow-50')}
+                    />
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={p.comision}
+                      placeholder="Sin cargar"
+                      onChange={(e) => cambiar(p.cuotas, { comision: e.target.value })}
+                      aria-label={'Te cobra la tarjeta en ' + p.cuotas + ' cuota(s), %'}
+                      className={claseInputPorcentaje(comMala, 'border-gray-300 bg-gray-50 placeholder:font-medium placeholder:text-gray-400')}
+                    />
+                    <span className="flex justify-center">
+                      <input
+                        type="checkbox"
+                        checked={p.visible}
+                        onChange={(e) => cambiar(p.cuotas, { visible: e.target.checked })}
+                        aria-label={'Mostrar ' + p.cuotas + ' cuota(s)'}
+                        className="w-5 h-5 accent-gray-900"
+                      />
+                    </span>
+                  </div>
+                  {(interesMalo || comMala) ? (
+                    <p className="mt-1 text-xs font-bold text-red-600">Revisá el porcentaje (ej: 27 o 27,5).</p>
+                  ) : monto > 0 && (
+                    <div className="mt-1 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 text-xs">
+                      <span>
+                        Cuota <span className={'font-black text-sm' + (p.visible ? ' text-gray-900' : '')}>ARS $ {fmt(c.cuota)}</span>
+                      </span>
+                      <span>Total ARS $ {fmt(c.total)}</span>
+                      {c.recibe === null ? (
+                        <span className="text-gray-400">Te queda: carga lo que te cobra la tarjeta</span>
+                      ) : (
+                        <span className={c.diferencia < 0 ? 'text-red-600' : 'text-green-700'}>
+                          Te queda <span className="font-black">ARS $ {fmt(c.recibe)}</span>{' '}
+                          ({c.diferencia < 0 ? '-' : '+'}$ {fmt(Math.abs(c.diferencia))})
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+          <p className="text-[11px] font-medium text-gray-500 mt-1">
+            Total = precio + lo que le cobras al cliente. Te queda = total - lo que te cobra la tarjeta sobre ese total; entre parentesis,
+            cuanto mas (o menos) que el precio. Las cuotas sin "Mostrar" no aparecen en el catalogo ni en el texto para copiar.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={conBloqueo(guardar)}
+            disabled={guardando || faltaTabla || !hayCambios}
+            className="flex-1 md:flex-none bg-gray-900 text-white px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-gray-800 transition disabled:opacity-40"
+          >
+            {hayCambios ? 'Guardar cambios' : 'Todo guardado'}
+          </button>
+          {hayCambios && (
+            <button
+              type="button"
+              onClick={() => cargar(JSON.parse(guardado).map(([cuotas, interes, visible]) => ({ cuotas, interes, visible })))}
+              className="flex-1 md:flex-none bg-white border border-gray-300 text-gray-800 px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-gray-50 transition"
+            >
+              Descartar cambios
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-200 max-w-2xl">
+        <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">Texto para mandarle al cliente</p>
+        {monto > 0 ? (
+          <Fragment>
+            <pre className="whitespace-pre-wrap font-sans text-sm font-semibold text-gray-900 bg-blue-50 border border-blue-200 rounded-lg p-3">
+              {textoParaCopiar(monto, planesNumericos)}
+            </pre>
+            <button
+              type="button"
+              onClick={copiar}
+              className="mt-2 w-full md:w-auto bg-blue-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-blue-700 transition"
+            >
+              Copiar texto
+            </button>
+          </Fragment>
+        ) : (
+          <p className="text-sm text-gray-500">Escribi un precio arriba. Solo van las cuotas marcadas en "Mostrar", con el aviso "{AVISO_CUOTAS}".</p>
+        )}
       </div>
     </div>
   );
@@ -2978,7 +3201,8 @@ function Admin() {
           <button onClick={() => cambiarTab('senas')} className={claseTab('senas')}>
             Señas{enSena.length > 0 ? ' (' + enSena.length + ')' : ''}
           </button>
-          <button onClick={() => cambiarTab('ventas')} className={claseTab('ventas') + ' col-span-2 md:col-span-1'}>Ventas</button>
+          <button onClick={() => cambiarTab('ventas')} className={claseTab('ventas')}>Ventas</button>
+          <button onClick={() => cambiarTab('tarjeta')} className={claseTab('tarjeta')}>Tarjeta</button>
         </div>
 
         {/* ===================== TAB CELULARES ===================== */}
@@ -3516,6 +3740,8 @@ function Admin() {
         )}
 
         {/* ===================== TAB VENTAS ===================== */}
+        {activeTab === 'tarjeta' && <PestanaTarjeta conBloqueo={conBloqueo} guardando={guardando} />}
+
         {activeTab === 'ventas' && (
         <div className="space-y-4">
           <div className="flex flex-col md:flex-row justify-between md:items-end gap-3">

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from './supabase';
 import FirmaLambda from './FirmaLambda';
+import SimuladorTarjeta from './SimuladorTarjeta';
 
 // Normaliza texto para comparar: quita caracteres raros, espacios repetidos y pasa a mayusculas
 const normalizar = (v) =>
@@ -477,8 +478,25 @@ function Catalogo() {
         >
           Accesorios
         </button>
+        <button
+          onClick={() => cambiarTab('tarjeta')}
+          className={
+            'flex-1 py-2 rounded-xl text-sm font-bold border transition ' +
+            (tabActiva === 'tarjeta'
+              ? 'bg-gray-900 text-white border-gray-900 shadow-sm'
+              : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50')
+          }
+        >
+          Con tarjeta
+        </button>
       </div>
 
+      {/* SIMULADOR DE CUOTAS CON TARJETA */}
+      {tabActiva === 'tarjeta' && (
+        <SimuladorTarjeta celulares={celularesAgrupados} cotizacion={cotizacion} numeroWhatsApp={numeroMontech} />
+      )}
+
+      {tabActiva !== 'tarjeta' && (
       <div className="mb-3">
         <input
           type="text"
@@ -488,6 +506,7 @@ function Catalogo() {
           className="w-full border border-gray-300 p-2 rounded-xl bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-200 outline-none transition text-sm"
         />
       </div>
+      )}
 
       {/* TABLA CELULARES */}
       {tabActiva === 'celulares' && (
