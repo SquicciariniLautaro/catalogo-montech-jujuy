@@ -44,12 +44,18 @@ const tablas = {
     }),
     // Venta de antes de que se guardara la cotizacion del dia
     celular(11, '11', 'vendido', { fecha_venta: dia(1), precio_usd: usd(300000) }),
+    // Venta en el local de un celular con dos cargadores, en una sola operacion
+    celular(12, '14 PRO', 'vendido', { fecha_venta: dia(22, 15), cotizacion_venta: COT, precio_usd: usd(740000), costo_usd: usd(600000) }),
     // Seña de Lucia: dejo 200 mil
     celular(9, '14', 'senado', { revendedor: 'Lucia', precio_revendedor: usd(700000), fecha_revendedor: dia(18), costo_usd: usd(550000) }),
   ],
   accesorios: [
     { id: 1, tipo: 'Cargador', modelo: '20W', color: 'Blanco', detalles: '', costo_usd: usd(5000), precio_usd: usd(12000), estado: 'disponible', promediado: false },
     { id: 2, tipo: 'Cargador', modelo: '20W', color: 'Blanco', detalles: '', costo_usd: usd(5000), precio_usd: usd(12000), estado: 'disponible', promediado: false },
+    ...[3, 4].map((id) => ({
+      id, tipo: 'Cargador', modelo: '20W', color: 'Blanco', detalles: '', costo_usd: usd(5000), precio_usd: usd(15000), estado: 'vendido',
+      fecha_venta: dia(22, 15), cotizacion_venta: COT, promediado: false,
+    })),
   ],
   pagos_revendedor: [
     pago(1, 'Federico', 300000, dia(5), true),
@@ -63,7 +69,7 @@ const tablas = {
   escalas_precio: [],
   revendedores_lista: [
     { id: 1, nombre: 'Federico', clave: 'FEDERICO', celular: null },
-    { id: 2, nombre: 'Juan', clave: 'JUAN', celular: null },
+    { id: 2, nombre: 'Juan', clave: 'JUAN', celular: '388 15 512-3456' },
     { id: 3, nombre: 'Martin', clave: 'MARTIN', celular: null },
     { id: 4, nombre: 'Pedro', clave: 'PEDRO', celular: null },
   ],
