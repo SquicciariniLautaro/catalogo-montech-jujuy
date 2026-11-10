@@ -1,7 +1,10 @@
--- Simulador de cuotas con tarjeta: interes de cada plan y si se muestra en el catalogo.
+-- Simulador de cuotas con tarjeta: interes de cada plan, comision de la tarjeta y si se muestra
+-- en el catalogo.
 --
--- El panel los cambia desde la pestana Tarjeta; el catalogo publico solo los lee para calcular las
--- cuotas. Arranca con los intereses del Excel "TARJETAS INTERESES MONTECH" (la cuota unica oculta).
+-- El panel los cambia desde la pestana Tarjeta; el catalogo publico solo lee las cuotas, el
+-- interes y si se muestra. La comision (lo que la tarjeta le descuenta al local) no la puede leer.
+-- Arranca con los intereses del Excel "TARJETAS INTERESES MONTECH" (la cuota unica oculta) y la
+-- comision sin cargar.
 -- Mientras esta tabla no exista, el panel y el catalogo usan esos mismos valores, pero el panel no
 -- puede guardar cambios.
 --
@@ -9,9 +12,12 @@
 
 create table if not exists public.planes_tarjeta (
   cuotas int primary key check (cuotas between 1 and 36),
-  interes numeric not null default 0 check (interes >= 0),   -- en porcentaje: 15 = 15%
+  interes numeric not null default 0 check (interes >= 0),   -- lo que se le suma al cliente, en porcentaje: 15 = 15%
+  comision numeric check (comision >= 0 and comision < 100),  -- lo que la tarjeta descuenta del total (vacio = sin cargar)
   visible boolean not null default true                       -- false = no aparece en el catalogo ni en el texto para copiar
 );
+-- Por si se corrio la primera version de este archivo, que no tenia la comision
+alter table public.planes_tarjeta add column if not exists comision numeric check (comision >= 0 and comision < 100);
 
 insert into public.planes_tarjeta (cuotas, interes, visible) values
   (1, 15, false),
@@ -27,7 +33,9 @@ drop policy if exists "panel_todo" on public.planes_tarjeta;
 create policy "panel_todo" on public.planes_tarjeta for all to authenticated using (true) with check (true);
 drop policy if exists "publico_lee" on public.planes_tarjeta;
 create policy "publico_lee" on public.planes_tarjeta for select to anon using (true);
-grant select on public.planes_tarjeta to anon;
+-- El publico solo puede leer estas tres columnas: la comision queda para el panel
+revoke all on public.planes_tarjeta from anon;
+grant select (cuotas, interes, visible) on public.planes_tarjeta to anon;
 grant select, insert, update, delete on public.planes_tarjeta to authenticated;
 
 -- Misma traba que el resto de las tablas si ya se corrio cobro-mensualidad.sql: en solo lectura

@@ -76,11 +76,11 @@ const tablas = {
   catalogo_config: [],
   // Intereses de las cuotas con tarjeta (los del Excel del local)
   planes_tarjeta: [
-    { cuotas: 1, interes: 15, visible: false },
-    { cuotas: 3, interes: 20, visible: true },
-    { cuotas: 6, interes: 27, visible: true },
-    { cuotas: 9, interes: 46, visible: true },
-    { cuotas: 12, interes: 57, visible: true },
+    { cuotas: 1, interes: 15, comision: null, visible: false },
+    { cuotas: 3, interes: 20, comision: 12, visible: true },
+    { cuotas: 6, interes: 27, comision: 20, visible: true },
+    { cuotas: 9, interes: 46, comision: null, visible: true },
+    { cuotas: 12, interes: 57, comision: 40, visible: true },
   ],
   // Mensualidad del sistema. Para probar las etapas del aviso: ?vence=AAAA-MM-DD en la direccion
   estado_servicio: [{

@@ -4,25 +4,33 @@
 //   texto            = "3 cuotas de $ 216.000"
 // El interes de cada plan y si se muestra o no se cambian desde el panel (pestana Tarjeta) y se
 // guardan en la tabla planes_tarjeta (sql/planes-tarjeta.sql). Sin esa tabla se usan los del Excel.
+//
+// Comision: lo que la tarjeta (o la maquina) le descuenta al local, sobre el total que paga el
+// cliente. Solo la ve el panel: lo que recibe el local = total financiado x (1 - comision).
+// Ejemplo: $ 100.000 al 27% son $ 127.000; si la tarjeta se queda con el 20%, entran $ 101.600.
 
 export const AVISO_CUOTAS = 'Cuotas aproximadas dependiendo la tarjeta';
 
 // Interes en porcentaje (15 = 15%). La cuota unica arranca oculta: en el Excel no va en el texto
-// para el cliente, y el pedido fue mostrar de 3 a 12 cuotas.
+// para el cliente, y el pedido fue mostrar de 3 a 12 cuotas. La comision arranca sin cargar (null).
 export const PLANES_POR_DEFECTO = [
-  { cuotas: 1, interes: 15, visible: false },
-  { cuotas: 3, interes: 20, visible: true },
-  { cuotas: 6, interes: 27, visible: true },
-  { cuotas: 9, interes: 46, visible: true },
-  { cuotas: 12, interes: 57, visible: true },
+  { cuotas: 1, interes: 15, comision: null, visible: false },
+  { cuotas: 3, interes: 20, comision: null, visible: true },
+  { cuotas: 6, interes: 27, comision: null, visible: true },
+  { cuotas: 9, interes: 46, comision: null, visible: true },
+  { cuotas: 12, interes: 57, comision: null, visible: true },
 ];
+
+const porcentajeOpcional = (v) => (v === null || v === undefined || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
 
 // Planes guardados en la base, completados con los por defecto que falten y ordenados por cuotas
 export function armarPlanes(filas) {
   const guardados = new Map();
   (filas || []).forEach((f) => {
     const cuotas = Math.round(Number(f.cuotas));
-    if (cuotas >= 1) guardados.set(cuotas, { cuotas, interes: Number(f.interes) || 0, visible: f.visible !== false });
+    if (cuotas >= 1) {
+      guardados.set(cuotas, { cuotas, interes: Number(f.interes) || 0, comision: porcentajeOpcional(f.comision), visible: f.visible !== false });
+    }
   });
   PLANES_POR_DEFECTO.forEach((p) => {
     if (!guardados.has(p.cuotas)) guardados.set(p.cuotas, { ...p });
@@ -37,9 +45,20 @@ export function leerPorcentaje(texto) {
   return Number(limpio);
 }
 
+// recibe: lo que le entra al local despues de la comision (null si no esta cargada) y
+// diferencia: cuanto mas (o menos, si es negativa) que el precio
 export function calcularPlan(monto, plan) {
-  const total = (Number(monto) || 0) * (1 + (Number(plan.interes) || 0) / 100);
-  return { ...plan, total: Math.round(total), cuota: Math.round(total / plan.cuotas) };
+  const precio = Number(monto) || 0;
+  const total = precio * (1 + (Number(plan.interes) || 0) / 100);
+  const comision = porcentajeOpcional(plan.comision);
+  const recibe = comision === null ? null : Math.round(total * (1 - comision / 100));
+  return {
+    ...plan,
+    total: Math.round(total),
+    cuota: Math.round(total / plan.cuotas),
+    recibe,
+    diferencia: recibe === null ? null : recibe - Math.round(precio),
+  };
 }
 
 export const pesos = (n) => '$ ' + Math.round(Number(n) || 0).toLocaleString('es-AR');

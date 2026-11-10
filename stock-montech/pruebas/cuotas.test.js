@@ -27,7 +27,7 @@ test('el texto para copiar lleva solo las cuotas visibles y el aviso, como la co
 test('los planes guardados reemplazan a los del Excel y se completan los que falten', () => {
   const planes = armarPlanes([{ cuotas: 6, interes: '30', visible: false }, { cuotas: 18, interes: 80, visible: true }]);
   assert.deepEqual(planes.map((p) => p.cuotas), [1, 3, 6, 9, 12, 18]);
-  assert.deepEqual(planes.find((p) => p.cuotas === 6), { cuotas: 6, interes: 30, visible: false });
+  assert.deepEqual(planes.find((p) => p.cuotas === 6), { cuotas: 6, interes: 30, comision: null, visible: false });
   assert.deepEqual(armarPlanes(null), PLANES_POR_DEFECTO);
 });
 
@@ -61,4 +61,17 @@ test('la entrega en efectivo no puede pasar el precio', () => {
     mensajeConsultaCuotas({ producto: '', precio: 100000, efectivo: 500000, plan, planes: PLANES_POR_DEFECTO }),
     /entregando \$ 100\.000 en efectivo y el resto \(\$ 0\)/
   );
+});
+
+test('lo que recibe el local: el total menos la comision de la tarjeta, sobre el total', () => {
+  // El ejemplo del audio: $ 100.000 en 6 cuotas al 27%, la tarjeta se queda con el 20%
+  const c = calcularPlan(100000, { cuotas: 6, interes: 27, comision: 20 });
+  assert.equal(c.total, 127000);
+  assert.equal(c.recibe, 101600);
+  assert.equal(c.diferencia, 1600);
+  // Si la comision es mayor que lo que se le suma al cliente, se pierde plata
+  assert.equal(calcularPlan(100000, { cuotas: 3, interes: 10, comision: 10 }).diferencia, -1000);
+  // Sin comision cargada no se calcula
+  assert.equal(calcularPlan(100000, { cuotas: 3, interes: 20, comision: null }).recibe, null);
+  assert.equal(armarPlanes([{ cuotas: 3, interes: 20, comision: '12.5', visible: true }])[1].comision, 12.5);
 });
