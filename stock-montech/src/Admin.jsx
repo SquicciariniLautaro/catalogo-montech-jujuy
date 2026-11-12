@@ -4,6 +4,7 @@ import toast from 'react-hot-toast';
 import FirmaLambda from './FirmaLambda';
 import AvisoPago from './AvisoPago';
 import { contabilizar, calcularMargenes } from './contabilidad';
+import { dolarDeCompra, dolarDeUnidad, costoEnPesos, comprasDeUnidades, cambiosDeCompra } from './compras';
 import { armarPlanes, leerPorcentaje, calcularPlan, textoParaCopiar, AVISO_CUOTAS } from './cuotas';
 import { estadoDelServicio, hoyArgentina, instalarSoloLectura, ponerSoloLectura, MENSAJE_SOLO_LECTURA } from './servicio';
 import { numeroWhatsApp, numeroWhatsAppLegible, mensajeCuenta, enlaceWhatsApp } from './whatsapp';
@@ -49,7 +50,7 @@ const VENTAS_POR_PAGINA = 10;
 
 // Colores del grafico por mes: paleta categorica en orden fijo
 const COLORES_GRAFICO = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300'];
-const ALTO_MENU = 335;
+const ALTO_MENU = 380;
 
 // Columnas compartidas por el encabezado y las filas del stock en escritorio
 const COLUMNAS_STOCK = 'md:grid md:grid-cols-[minmax(0,1fr)_17rem_8rem] md:gap-4 md:items-center';
@@ -177,14 +178,20 @@ const claveAccesorio = (a) =>
     normalizar(a.detalles),
   ].join('|');
 
+// Lo que se guarda de cada unidad de un lote para separar sus compras (costo y dolar de compra)
+const datosDeCompra = (f) => ({ id: f.id, costo_usd: f.costo_usd, cotizacion_costo: f.cotizacion_costo });
+
 // Agrupa las unidades iguales en una sola fila y las ordena. Cada registro de la BD es una
 // unidad, por lo que total / cantidad es el promedio ponderado de costo y de precio del lote.
+// Cada unidad conserva su costo y su dolar de compra (en unidades); las filas llegan ordenadas
+// por id, asi que la primera es la mas vieja y es la que sale primero al vender.
 const agruparStock = (filas, claveFn, ordenar) => {
   const grupos = filas.reduce((acc, f) => {
     const k = claveFn(f);
-    if (!acc[k]) acc[k] = { ...f, cantidad: 0, ids: [], costoTotal: 0, precioTotal: 0, promediado: false };
+    if (!acc[k]) acc[k] = { ...f, cantidad: 0, ids: [], unidades: [], costoTotal: 0, precioTotal: 0, promediado: false };
     acc[k].cantidad += 1;
     acc[k].ids.push(f.id);
+    acc[k].unidades.push(datosDeCompra(f));
     if (f.promediado) acc[k].promediado = true;
     acc[k].costoTotal += Number(f.costo_usd) || 0;
     acc[k].precioTotal += Number(f.precio_usd) || 0;
@@ -259,7 +266,9 @@ async function porTandas(ids, operacion) {
   return { error: null };
 }
 
-// Inserta unidades nuevas y unifica costo y precio del lote con el promedio ponderado
+// Inserta unidades nuevas y unifica el precio de venta del lote con el promedio ponderado. El
+// costo NO se promedia: cada compra conserva su costo en USD y su dolar de compra
+// (cotizacion_costo de filaBase), para que su costo en pesos sea lo que realmente se pago.
 async function guardarLoteConPromedio(tabla, filaBase, cantidad, claveFn) {
   const { data: existentes, error: errorBusqueda } = await traerTodo(() =>
     supabase.from(tabla).select('*').eq('estado', 'disponible').order('id')
@@ -269,34 +278,39 @@ async function guardarLoteConPromedio(tabla, filaBase, cantidad, claveFn) {
   const claveNueva = claveFn(filaBase);
   const mismos = (existentes || []).filter((e) => claveFn(e) === claveNueva);
   const total = mismos.length + cantidad;
-  const promediar = (campo) =>
-    redondear((mismos.reduce((acc, e) => acc + (Number(e[campo]) || 0), 0) + filaBase[campo] * cantidad) / total);
-  const costo = promediar('costo_usd');
-  const precio = promediar('precio_usd');
+  const precio = redondear((mismos.reduce((acc, e) => acc + (Number(e.precio_usd) || 0), 0) + filaBase.precio_usd * cantidad) / total);
 
   const nuevos = Array.from({ length: cantidad }, () => ({
     ...filaBase,
-    costo_usd: costo,
     precio_usd: precio,
     estado: 'disponible',
   }));
 
-  // El lote queda marcado como promediado si se juntaron unidades con distinto costo o precio
-  const mezcla = mismos.some(
-    (e) => Number(e.costo_usd) !== Number(filaBase.costo_usd) || Number(e.precio_usd) !== Number(filaBase.precio_usd)
-  );
+  // El lote queda marcado como promediado si se juntaron unidades con distinto precio de venta
+  const mezcla = mismos.some((e) => Number(e.precio_usd) !== Number(filaBase.precio_usd));
   const promediado = mezcla || mismos.some((e) => e.promediado === true);
 
-  const { data: insertados, error } = await supabase.from(tabla).insert(nuevos).select('id');
+  let { data: insertados, error } = await supabase.from(tabla).insert(nuevos).select('id');
+  // El dolar de compra vive en una columna opcional: si la base todavia no la tiene, se guarda
+  // igual sin ese dato y se avisa
+  const sinDolar = Boolean(error) && 'cotizacion_costo' in filaBase && String(error.message).includes('cotizacion_costo');
+  if (sinDolar) {
+    ({ data: insertados, error } = await supabase
+      .from(tabla)
+      .insert(nuevos.map((fila) => {
+        const copia = { ...fila };
+        delete copia.cotizacion_costo;
+        return copia;
+      }))
+      .select('id'));
+  }
   if (error) return { error };
 
-  const idsDesactualizados = mismos
-    .filter((e) => Number(e.costo_usd) !== costo || Number(e.precio_usd) !== precio)
-    .map((e) => e.id);
+  const idsDesactualizados = mismos.filter((e) => Number(e.precio_usd) !== precio).map((e) => e.id);
   if (idsDesactualizados.length > 0) {
     const { error: errorUpdate } = await porTandas(idsDesactualizados, (tanda) => supabase
       .from(tabla)
-      .update({ costo_usd: costo, precio_usd: precio })
+      .update({ precio_usd: precio })
       .in('id', tanda));
     if (errorUpdate) return { error: errorUpdate };
   }
@@ -307,7 +321,7 @@ async function guardarLoteConPromedio(tabla, filaBase, cantidad, claveFn) {
     await porTandas(idsLote, (tanda) => supabase.from(tabla).update({ promediado: true }).in('id', tanda));
   }
 
-  return { error: null, costo, precio, unificadas: mismos.length };
+  return { error: null, precio, unificadas: mismos.length, sinDolar };
 }
 
 // Cuentas a cobrar: equipos entregados a un revendedor o senados por un cliente. Las dos
@@ -385,13 +399,14 @@ const MEDIO_PESO = 0.5;
 const AVISO_SIN_PRECIO_FIJO =
   'Falta actualizar la base de datos (correr el SQL): mientras tanto, el precio de los revendedores y señas se sigue moviendo con el dolar.';
 
-// El costo se pasa a pesos con la cotizacion de costo y la venta con la de venta: la ganancia
-// es la diferencia en pesos, y en dolares se expresa a la cotizacion de venta.
+// El costo se pasa a pesos con el dolar de compra de cada unidad (o, si no tiene, con la
+// cotizacion de costo de hoy) y la venta con la de venta: la ganancia es la diferencia en pesos,
+// y en dolares se expresa a la cotizacion de venta.
 const calcularStats = (arrayStock, cot, cotCosto) => {
   const totalQty = arrayStock.reduce((acc, item) => acc + item.cantidad, 0);
   const totalCosto = arrayStock.reduce((acc, item) => acc + item.costoTotal, 0);
   const totalVenta = arrayStock.reduce((acc, item) => acc + item.precioTotal, 0);
-  const costoArs = totalCosto * cotCosto;
+  const costoArs = arrayStock.reduce((acc, item) => acc + costoEnPesos(item.unidades, cotCosto), 0);
   const gananciaArs = totalVenta * cot - costoArs;
   return { totalQty, totalCosto, totalVenta, costoArs, gananciaUsd: cot ? gananciaArs / cot : totalVenta - totalCosto, gananciaArs };
 };
@@ -572,6 +587,30 @@ function PesosDe({ usd, cot }) {
   );
 }
 
+// Dolar al que se pago una compra de mercaderia. Vacio = el "Costo $" de arriba. Queda guardado
+// en cada unidad, asi su costo en pesos no cambia cuando se mueve el dolar.
+function CampoDolarCompra({ valor, onChange, costoHoy, clase }) {
+  return (
+    <div className="flex flex-col min-w-0">
+      <input
+        name="cotizacion_costo"
+        value={valor}
+        onChange={onChange}
+        type="number"
+        min="0"
+        step="any"
+        placeholder={'Dolar ' + fmt(costoHoy)}
+        aria-label="Dolar de compra"
+        title="Dolar al que pagaste esta compra. Si lo dejas vacio, se usa el Costo $ de arriba"
+        className={clase}
+      />
+      <span className="block h-3 mt-1 ml-1 truncate text-[10px] font-bold text-blue-600 normal-case tracking-normal">
+        {parseFloat(valor) > 0 ? 'Dolar de compra' : 'Dolar de compra = Costo $'}
+      </span>
+    </div>
+  );
+}
+
 // Campo con etiqueta para los formularios de edicion
 function Campo({ etiqueta, className = '', children }) {
   return (
@@ -614,14 +653,33 @@ function ResumenStock({ etiqueta, stats }) {
 }
 
 // Dato con etiqueta dentro de una fila de stock
-function DatoStock({ etiqueta, valor, clase, detalle }) {
+function DatoStock({ etiqueta, valor, clase, detalle, nota, tituloNota }) {
   return (
     <div className="min-w-0">
       <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wide">{etiqueta}</span>
       <span className={'block text-sm font-bold break-words ' + clase}>{valor}</span>
       {detalle && <span className="block text-[10px] font-semibold text-gray-500 break-words">{detalle}</span>}
+      {nota && <span className="block text-[10px] font-bold text-blue-600 break-words" title={tituloNota}>{nota}</span>}
     </div>
   );
+}
+
+// Dolar con el que se muestra en pesos el costo de un lote al editarlo: el de sus unidades si es
+// uno solo; si hay varios (o ninguno guardado), el Costo $ de hoy
+function dolarDelLote(item, costoHoy) {
+  const dolares = [...new Set((item.unidades || []).map((u) => dolarDeUnidad(u, costoHoy)))];
+  return dolares.length === 1 ? dolares[0] : costoHoy;
+}
+
+// Resumen del dolar de compra de un lote para la fila del stock: "Dolar 1.600", "2 compras" o,
+// si sus unidades todavia no tienen dolar guardado, el de hoy
+function notaDolar(compras) {
+  if (compras.length > 1) {
+    const dolares = [...new Set(compras.map((c) => c.dolar))].map((d) => (d ? fmt(d) : 'el de hoy'));
+    return { nota: compras.length + ' compras', titulo: 'Compras con distinto costo o dolar (' + dolares.join(', ') + '). Detalle en Opciones > Compras y dolar' };
+  }
+  if (compras.length === 1 && compras[0].dolar) return { nota: 'Dolar ' + fmt(compras[0].dolar), titulo: 'Dolar al que se compro' };
+  return { nota: 'Dolar de hoy', titulo: 'Sin dolar de compra guardado: usa el Costo $ de arriba' };
 }
 
 // Titulo de la seccion de stock y, en escritorio, nombres de las columnas
@@ -744,6 +802,10 @@ function FilaStock({ item, titulo, subtitulo, cot, cotCosto, onOpciones }) {
     'shrink-0 px-2 py-0.5 rounded text-xs font-bold shadow-sm ' +
     (sinStock ? 'bg-gray-200 text-gray-700 border border-gray-300' : 'bg-blue-600 text-white');
   const fuera = item.fuera || { revendedor: 0, sena: 0 };
+  // Costo en pesos por unidad, cada compra a su dolar
+  const unidades = item.unidades || [];
+  const costoArsUnidad = unidades.length > 0 ? costoEnPesos(unidades, cotCosto) / unidades.length : item.costo_usd * cotCosto;
+  const dolar = notaDolar(comprasDeUnidades(unidades));
   return (
     <div className="hover:bg-gray-50 transition">
       <button
@@ -796,14 +858,16 @@ function FilaStock({ item, titulo, subtitulo, cot, cotCosto, onOpciones }) {
             etiqueta="Costo USD"
             valor={'$ ' + fmt(item.costo_usd)}
             clase="text-red-500"
-            detalle={'ARS $ ' + fmt(Math.round(item.costo_usd * cotCosto))}
+            detalle={'ARS $ ' + fmt(Math.round(costoArsUnidad))}
+            nota={dolar.nota}
+            tituloNota={dolar.titulo}
           />
           <DatoStock etiqueta="Venta USD" valor={'$ ' + fmt(item.precio_usd)} clase="text-green-600" />
           <DatoStock etiqueta="Venta ARS" valor={'$ ' + fmt(Math.round(item.precio_usd * cot))} clase="text-gray-800" />
           {item.promediado && (
             <span
               className="col-span-3 text-[9px] font-bold text-blue-500 uppercase tracking-wide"
-              title="Costo y venta son el promedio ponderado de ingresos con distintos valores"
+              title="La venta es el promedio ponderado de ingresos con distintos precios. El costo de cada compra se conserva"
             >
               Promediado
             </span>
@@ -1104,8 +1168,9 @@ function Admin() {
   const [carritoCelular, setCarritoCelular] = useState('');
   const [cargando, setCargando] = useState(true);
 
-  const estadoInicialCelular = { modelo: '', capacidad: '', color: '', bateria: '', costo_usd: '', precio_usd: '', detalles: '', cantidad: 1 };
-  const estadoInicialAccesorio = { tipo: '', modelo: '', color: '', costo_usd: '', precio_usd: '', detalles: '', cantidad: 1 };
+  // cotizacion_costo = dolar de compra; vacio = el "Costo $" de arriba
+  const estadoInicialCelular = { modelo: '', capacidad: '', color: '', bateria: '', costo_usd: '', cotizacion_costo: '', precio_usd: '', detalles: '', cantidad: 1 };
+  const estadoInicialAccesorio = { tipo: '', modelo: '', color: '', costo_usd: '', cotizacion_costo: '', precio_usd: '', detalles: '', cantidad: 1 };
   const estadoInicialPermuta = { modelo: '', capacidad: '', color: '', bateria: '', detalles: '', precio_ars: '', precio_venta_ars: '', entregaId: '' };
 
   const [formCelular, setFormCelular] = useState(estadoInicialCelular);
@@ -1143,7 +1208,8 @@ function Admin() {
   const [edicionPago, setEdicionPago] = useState(null); // { cuenta, nombre, pago, monto (ARS) }
   const [edicionVenta, setEdicionVenta] = useState(null); // { item, precio (ARS por unidad) }
   const [edicionPrecioCuenta, setEdicionPrecioCuenta] = useState(null); // { lote, precio (ARS por unidad), cantidad }
-  const [suma, setSuma] = useState(null); // { item, tabla, cantidad }
+  const [suma, setSuma] = useState(null); // { item, tabla, cantidad, costo, dolar }
+  const [comprasLote, setComprasLote] = useState(null); // { item, tabla, filas: [{ compra, costo, dolar }] }
   const [borrado, setBorrado] = useState(null); // { item, tabla, cantidad }
   const [resolucion, setResolucion] = useState(null); // { lote, destino, cantidad }
   const [dialogo, setDialogo] = useState(null); // { titulo, texto, botones: [{ etiqueta, clase, accion }] }
@@ -1153,10 +1219,10 @@ function Admin() {
   // Hay dos cotizaciones del dolar. La de venta pasa a pesos los precios, los cobros y los saldos
   // (y es la del catalogo publico). La de costo pasa a pesos lo que cuesta la mercaderia, porque
   // los proveedores la cotizan a otro valor. Si no se cargo una de costo, es la misma de venta.
+  // La de costo es la que se propone como dolar de compra al cargar mercaderia: cada unidad
+  // guarda el suyo, y solo las que no lo tienen siguen a la de costo de hoy.
   const cot = Number(cotizacion) || 0;
   const cotCosto = Number(cotizacionCosto) || cot;
-  // Por cuanto se multiplica un costo en USD del stock para llevarlo a dolares de venta
-  const factorCosto = cot ? cotCosto / cot : 1;
 
   // Cotizacion con la que se cerro una venta. Las ventas anteriores a que se guardara
   // ese dato usan la cotizacion actual.
@@ -1189,17 +1255,34 @@ function Admin() {
     o.cuenta === 'revendedor' ? 'Revendedor: ' + o.nombre : o.cuenta === 'sena' ? 'Seña de ' + o.nombre : 'Cuenta de ' + o.nombre;
 
   // Marca unidades como vendidas y guarda las cotizaciones del dia (venta y costo), para que el
-  // historial en pesos y la ganancia no cambien cuando se mueve el dolar. En celulares guarda
-  // tambien el valor del equipo recibido en permuta (vacio si fue una venta comun). Esas columnas
-  // son opcionales: si la base todavia no las tiene, registra la venta igual sin ese dato y avisa
-  // cuales faltaron.
+  // historial en pesos y la ganancia no cambien cuando se mueve el dolar. Las unidades que ya
+  // tienen dolar de compra lo conservan: su costo se pasa a pesos con lo que realmente se pago.
+  // En celulares guarda tambien el valor del equipo recibido en permuta (vacio si fue una venta
+  // comun). Esas columnas son opcionales: si la base todavia no las tiene, registra la venta igual
+  // sin ese dato y avisa cuales faltaron.
   async function marcarVendido(tabla, ids, cambios, fecha = new Date().toISOString()) {
-    const datos = { estado: 'vendido', fecha_venta: fecha, cotizacion_venta: cot, cotizacion_costo: cotCosto, ...cambios };
+    const datos = { estado: 'vendido', fecha_venta: fecha, cotizacion_venta: cot, ...cambios };
     if (tabla === 'celulares' && datos.permuta_usd === undefined) datos.permuta_usd = null;
     // Las ventas de una cuenta (revendedor o sena) guardan de cual salieron y conservan el nombre.
     // Una venta directa del local no viene de ninguna: se limpian datos de entregas anteriores.
     if (datos.cuenta_venta === undefined) Object.assign(datos, { cuenta_venta: null, ...SIN_CUENTA });
-    return actualizarUnidades(tabla, ids, datos);
+
+    const conDolar = new Set();
+    await porTandas(ids, async (tanda) => {
+      const resultado = await supabase.from(tabla).select('id, cotizacion_costo').in('id', tanda);
+      (resultado.data || []).forEach((u) => Number(u.cotizacion_costo) > 0 && conDolar.add(u.id));
+      return { error: null }; // sin la columna, todas toman el Costo $ del dia, como antes
+    });
+    const idsConDolar = ids.filter((id) => conDolar.has(id));
+    const idsSinDolar = ids.filter((id) => !conDolar.has(id));
+    const omitidas = new Set();
+    for (const [grupo, extra] of [[idsSinDolar, { cotizacion_costo: cotCosto }], [idsConDolar, {}]]) {
+      if (grupo.length === 0) continue;
+      const resultado = await actualizarUnidades(tabla, grupo, { ...datos, ...extra });
+      resultado.omitidas.forEach((c) => omitidas.add(c));
+      if (resultado.error) return { error: resultado.error, omitidas: [...omitidas] };
+    }
+    return { error: null, omitidas: [...omitidas] };
   }
 
   // Actualiza unidades. Si la base todavia no tiene alguna columna opcional, guarda el resto y
@@ -1480,27 +1563,37 @@ function Admin() {
   const handleChangeAccesorio = (e) => setFormAccesorio({ ...formAccesorio, [e.target.name]: e.target.value });
   const handleChangePermuta = (e) => setFormPermuta({ ...formPermuta, [e.target.name]: e.target.value });
 
-  const mensajeLote = (cantidad, nombre, resultado) =>
-    resultado.unificadas > 0
-      ? cantidad + ' ' + nombre + ' sumado(s) al lote existente. Promedio: costo USD ' + resultado.costo + ' / venta USD ' + resultado.precio
-      : cantidad + ' ' + nombre + ' agregado(s)';
+  const mensajeLote = (cantidad, nombre, resultado, dolar) =>
+    (resultado.unificadas > 0
+      ? cantidad + ' ' + nombre + ' sumado(s) al lote existente, con su propio costo. Venta promedio: USD ' + resultado.precio
+      : cantidad + ' ' + nombre + ' agregado(s)') + (resultado.sinDolar ? '' : ' (dolar de compra ' + fmt(dolar) + ')');
+
+  // Aviso si la base todavia no tiene donde guardar el dolar de compra
+  const avisarSinDolar = (resultado) => {
+    if (resultado.sinDolar) {
+      toast.error('Se cargo, pero sin el dolar de compra: falta actualizar la base de datos (correr el SQL dolar-de-compra).', { duration: 8000 });
+    }
+  };
 
   async function handleGuardarCelular(e) {
     e.preventDefault();
     const cantidad = parseInt(formCelular.cantidad) || 1;
+    const dolar = dolarDeCompra(formCelular.cotizacion_costo, cotCosto);
     const filaBase = {
       modelo: formCelular.modelo.trim().toUpperCase(),
       capacidad: formatearCapacidad(formCelular.capacidad),
       color: colorCanonico(formCelular.color),
       bateria: parseInt(formCelular.bateria),
       costo_usd: parseFloat(formCelular.costo_usd),
+      cotizacion_costo: dolar,
       precio_usd: parseFloat(formCelular.precio_usd),
       detalles: formCelular.detalles.trim(),
     };
 
     const resultado = await guardarLoteConPromedio('celulares', filaBase, cantidad, claveCelular);
     if (!resultado.error) {
-      toast.success(mensajeLote(cantidad, 'equipo(s)', resultado));
+      toast.success(mensajeLote(cantidad, 'equipo(s)', resultado, dolar));
+      avisarSinDolar(resultado);
       setFormCelular({ ...formCelular, cantidad: 1, color: '' });
       setIngresosGuardados((n) => n + 1);
       cargarDatos(false);
@@ -1510,18 +1603,21 @@ function Admin() {
   async function handleGuardarAccesorio(e) {
     e.preventDefault();
     const cantidad = parseInt(formAccesorio.cantidad) || 1;
+    const dolar = dolarDeCompra(formAccesorio.cotizacion_costo, cotCosto);
     const filaBase = {
       tipo: formAccesorio.tipo.trim(),
       modelo: formAccesorio.modelo.trim(),
       color: colorCanonico(formAccesorio.color),
       costo_usd: parseFloat(formAccesorio.costo_usd),
+      cotizacion_costo: dolar,
       precio_usd: parseFloat(formAccesorio.precio_usd),
       detalles: formAccesorio.detalles.trim(),
     };
 
     const resultado = await guardarLoteConPromedio('accesorios', filaBase, cantidad, claveAccesorio);
     if (!resultado.error) {
-      toast.success(mensajeLote(cantidad, 'accesorio(s)', resultado));
+      toast.success(mensajeLote(cantidad, 'accesorio(s)', resultado, dolar));
+      avisarSinDolar(resultado);
       setFormAccesorio({ ...formAccesorio, cantidad: 1, color: '' });
       setIngresosGuardados((n) => n + 1);
       cargarDatos(false);
@@ -1550,6 +1646,8 @@ function Admin() {
       color: colorCanonico(formPermuta.color),
       bateria: parseInt(formPermuta.bateria),
       costo_usd: costoUsd,
+      // Su costo en pesos queda fijo en el valor de toma
+      cotizacion_costo: cotCosto,
       precio_usd: ventaUsd,
       detalles: formPermuta.detalles.trim(),
     };
@@ -1795,7 +1893,8 @@ function Admin() {
       g.unidades += 1;
       g.totalUsd += precio;
       g.totalArs += precioArs;
-      g.costoTotalUsd += Number(u.costo_usd) || 0;
+      // En dolares de venta: el costo en pesos (a su dolar de compra) dividido por la cotizacion de venta
+      g.costoTotalUsd += cot ? ((Number(u.costo_usd) || 0) * dolarDeUnidad(u, cotCosto)) / cot : Number(u.costo_usd) || 0;
       const kl = [u.tabla, u.tabla === 'celulares' ? claveCelular(u) : claveAccesorio(u), Math.round(precioArs * 100), tienePrecioFijo(u), diaEntrega(u)].join('|');
       if (!g.lotes[kl]) {
         g.lotes[kl] = { ...u, cuenta, cantidad: 0, ids: [], precioUnidad: precio, precioTotal: 0, precioUnidadArs: precioArs, precioTotalArs: 0, fijo: tienePrecioFijo(u) };
@@ -1833,8 +1932,8 @@ function Admin() {
         const creditoUsd = g.pagadoUsd - g.aplicadoUsd;
         const creditoArs = g.pagadoArs - g.aplicadoArs;
         // Margen = parte del precio acordado que es ganancia, sobre todos los equipos que tiene
-        // (con el costo a la cotizacion de costo)
-        const margen = g.totalUsd > 0 ? (g.totalUsd - g.costoTotalUsd * factorCosto) / g.totalUsd : 0;
+        // (con el costo de cada equipo a su dolar de compra)
+        const margen = g.totalUsd > 0 ? (g.totalUsd - g.costoTotalUsd) / g.totalUsd : 0;
         // Saldo en pesos (negativo si tiene plata a favor). En dolares, solo como referencia.
         const saldoArs = g.totalArs - creditoArs;
         return { ...g, lotes: Object.values(g.lotes), creditoUsd, creditoArs, margen, saldoArs, saldoUsd: cot ? saldoArs / cot : 0 };
@@ -2403,14 +2502,15 @@ function Admin() {
     });
 
   // El revendedor devuelve el equipo (o se cancela la sena): vuelve al stock. Si en el local
-  // quedan unidades de ese mismo lote, toma su costo y su precio actuales, para que al juntarse
-  // no cambie el promedio ni el precio de las demas. Si no queda ninguna, conserva los suyos.
+  // quedan unidades de ese mismo lote, toma su precio actual, para que al juntarse no cambie el
+  // precio de las demas. Si no queda ninguna, conserva el suyo. El costo y el dolar de compra
+  // son de la unidad y no cambian.
   async function devolverRevendedor(lote, ids) {
     const { tabla } = lote;
     const claveFn = tabla === 'celulares' ? claveCelular : claveAccesorio;
     const enLocal = (tabla === 'celulares' ? stockCelulares : stockAccesorios).find((l) => claveFn(l) === claveFn(lote));
     const datos = { estado: 'disponible', ...SIN_CUENTA };
-    if (enLocal) Object.assign(datos, { costo_usd: enLocal.costo_usd, precio_usd: enLocal.precio_usd });
+    if (enLocal) Object.assign(datos, { precio_usd: enLocal.precio_usd });
     const { error } = await actualizarUnidades(tabla, ids, datos);
     if (error) {
       toast.error('Error al actualizar: ' + error.message);
@@ -2669,13 +2769,21 @@ function Admin() {
 
   // ---------- Sumar stock a un lote existente ----------
   const cantidadSuma = suma ? Math.max(1, parseInt(suma.cantidad) || 1) : 0;
+  // Costo propuesto para la compra nueva: el de la ultima compra del lote
+  const costoPropuestoSuma = (item) => {
+    const unidades = item.unidades || [];
+    return unidades.length > 0 ? Number(unidades[unidades.length - 1].costo_usd) : Number(item.costo_usd);
+  };
+  const costoSuma = suma ? (parseFloat(suma.costo) >= 0 ? parseFloat(suma.costo) : costoPropuestoSuma(suma.item)) : 0;
+  const dolarSuma = suma ? dolarDeCompra(suma.dolar, cotCosto) : 0;
 
   async function sumarStock() {
     const { item, tabla } = suma;
     const comunes = {
       modelo: item.modelo,
       color: item.color,
-      costo_usd: Number(item.costo_usd),
+      costo_usd: costoSuma,
+      cotizacion_costo: dolarSuma,
       precio_usd: Number(item.precio_usd),
       detalles: item.detalles || '',
     };
@@ -2685,12 +2793,59 @@ function Admin() {
         : { ...comunes, tipo: item.tipo };
     const cantidad = cantidadSuma;
     setSuma(null);
-    const { error } = await guardarLoteConPromedio(tabla, filaBase, cantidad, tabla === 'celulares' ? claveCelular : claveAccesorio);
-    if (error) {
-      toast.error('Error al sumar stock: ' + error.message);
+    const resultado = await guardarLoteConPromedio(tabla, filaBase, cantidad, tabla === 'celulares' ? claveCelular : claveAccesorio);
+    if (resultado.error) {
+      toast.error('Error al sumar stock: ' + resultado.error.message);
       return;
     }
-    toast.success(cantidad + ' unidad(es) sumada(s) al stock');
+    toast.success(cantidad + ' unidad(es) sumada(s) al stock' + (resultado.sinDolar ? '' : ' (dolar de compra ' + fmt(dolarSuma) + ')'));
+    avisarSinDolar(resultado);
+    cargarDatos(false);
+  }
+
+  // ---------- Compras de un lote (costo y dolar de compra de cada una) ----------
+  const abrirComprasLote = (item, tabla) =>
+    setComprasLote({
+      item,
+      tabla,
+      filas: comprasDeUnidades(item.unidades).map((compra) => ({
+        compra,
+        costo: String(compra.costo_usd),
+        dolar: compra.dolar ? String(compra.dolar) : '',
+      })),
+    });
+  const cambiarFilaCompra = (i, campo, valor) =>
+    setComprasLote({ ...comprasLote, filas: comprasLote.filas.map((f, j) => (j === i ? { ...f, [campo]: valor } : f)) });
+
+  async function guardarComprasLote() {
+    const { tabla, filas } = comprasLote;
+    const pendientes = [];
+    for (const fila of filas) {
+      const resultado = cambiosDeCompra(fila.compra, { costo_usd: fila.costo, dolar: fila.dolar });
+      if (resultado && resultado.error) {
+        toast.error(resultado.error);
+        return;
+      }
+      if (resultado) pendientes.push({ ids: fila.compra.ids, cambios: resultado.cambios });
+    }
+    if (pendientes.length === 0) {
+      setComprasLote(null);
+      return;
+    }
+    let sinDolar = false;
+    for (const { ids, cambios } of pendientes) {
+      const { error, omitidas } = await actualizarUnidades(tabla, ids, cambios);
+      if (error) {
+        toast.error('Error al guardar las compras: ' + error.message);
+        cargarDatos(false);
+        return;
+      }
+      if (omitidas.includes('cotizacion_costo')) sinDolar = true;
+    }
+    setComprasLote(null);
+    if (sinDolar) {
+      toast.error('No se guardo el dolar de compra: falta actualizar la base de datos (correr el SQL dolar-de-compra).', { duration: 8000 });
+    } else toast.success(pendientes.length === 1 ? 'Compra actualizada' : pendientes.length + ' compras actualizadas');
     cargarDatos(false);
   }
 
@@ -2720,7 +2875,7 @@ function Admin() {
   const iniciarEdicionCelular = (celular) => {
     const ids = idsEditables(celular);
     setEditandoCelularId(idDeFila(celular));
-    setFormEdicionCelular({ ...celular, ids, cantidadAEditar: ids.length });
+    setFormEdicionCelular({ ...celular, ids, cantidadAEditar: ids.length, costoOriginal: celular.costo_usd });
   };
   const handleChangeEdicionCelular = (e) => setFormEdicionCelular({ ...formEdicionCelular, [e.target.name]: e.target.value });
 
@@ -2738,7 +2893,10 @@ function Admin() {
       return null;
     }
     const ids = form.ids.slice(0, parseInt(form.cantidadAEditar) || form.ids.length);
-    return { color, costo_usd, precio_usd, ids };
+    // El costo que muestra el formulario es el promedio del lote: si no se toco, cada compra
+    // conserva el suyo (se cambian desde "Compras y dolar")
+    const costoTocado = redondear(costo_usd) !== redondear(form.costoOriginal);
+    return { color, precio_usd, ids, costo: costoTocado ? { costo_usd } : {} };
   };
 
   async function guardarEdicionCelular() {
@@ -2756,7 +2914,7 @@ function Admin() {
         capacidad: formatearCapacidad(formEdicionCelular.capacidad),
         color: datos.color,
         bateria: parseInt(formEdicionCelular.bateria) || 0,
-        costo_usd: datos.costo_usd,
+        ...datos.costo,
         precio_usd: datos.precio_usd,
         detalles: String(formEdicionCelular.detalles || '').trim(),
       })
@@ -2774,7 +2932,7 @@ function Admin() {
   const iniciarEdicionAccesorio = (acc) => {
     const ids = idsEditables(acc);
     setEditandoAccesorioId(idDeFila(acc));
-    setFormEdicionAccesorio({ ...acc, ids, cantidadAEditar: ids.length });
+    setFormEdicionAccesorio({ ...acc, ids, cantidadAEditar: ids.length, costoOriginal: acc.costo_usd });
   };
   const handleChangeEdicionAccesorio = (e) => setFormEdicionAccesorio({ ...formEdicionAccesorio, [e.target.name]: e.target.value });
 
@@ -2792,7 +2950,7 @@ function Admin() {
         tipo,
         modelo: String(formEdicionAccesorio.modelo || '').trim(),
         color: datos.color,
-        costo_usd: datos.costo_usd,
+        ...datos.costo,
         precio_usd: datos.precio_usd,
         detalles: String(formEdicionAccesorio.detalles || '').trim(),
       })
@@ -2844,8 +3002,9 @@ function Admin() {
       unidades.forEach((u) => {
         if (u.tabla !== tabla) return;
         const k = claveFn(u);
-        if (!fuera[k]) fuera[k] = { muestra: u, ids: [], revendedor: 0, sena: 0, costoTotal: 0, precioTotal: 0 };
+        if (!fuera[k]) fuera[k] = { muestra: u, ids: [], unidades: [], revendedor: 0, sena: 0, costoTotal: 0, precioTotal: 0 };
         fuera[k].ids.push(u.id);
+        fuera[k].unidades.push(datosDeCompra(u));
         fuera[k][campo] += 1;
         fuera[k].costoTotal += Number(u.costo_usd) || 0;
         fuera[k].precioTotal += Number(u.precio_usd) || 0;
@@ -2869,6 +3028,7 @@ function Admin() {
           cantidad: 0,
           ids: [],
           idsFuera: f.ids,
+          unidades: f.unidades,
           promediado: false,
           costo_usd: redondear(f.costoTotal / total),
           precio_usd: redondear(f.precioTotal / total),
@@ -3241,15 +3401,16 @@ function Admin() {
                   <input required name="bateria" value={formCelular.bateria} onChange={handleChangeCelular} type="number" min="0" max="100" placeholder="Bateria %" className={claseInput} />
                   <div className="flex flex-col min-w-0">
                     <input required name="costo_usd" value={formCelular.costo_usd} onChange={handleChangeCelular} type="number" min="0" step="any" placeholder="Costo (USD)" className={claseInput} />
-                    <PesosDe usd={formCelular.costo_usd} cot={cotCosto} />
+                    <PesosDe usd={formCelular.costo_usd} cot={dolarDeCompra(formCelular.cotizacion_costo, cotCosto)} />
                   </div>
+                  <CampoDolarCompra valor={formCelular.cotizacion_costo} onChange={handleChangeCelular} costoHoy={cotCosto} clase={claseInput} />
                   <div className="flex flex-col min-w-0">
                     <input required name="precio_usd" value={formCelular.precio_usd} onChange={handleChangeCelular} type="number" min="0" step="any" placeholder="Venta (USD)" className={claseInput} />
                     <span className="text-[10px] text-green-600 font-bold mt-1 ml-1 h-3">
                       {formCelular.precio_usd ? 'ARS $ ' + fmt(formCelular.precio_usd * cot) : ''}
                     </span>
                   </div>
-                  <input name="detalles" value={formCelular.detalles} onChange={handleChangeCelular} type="text" placeholder="Detalles (Opcional)" className={claseInput + ' col-span-2'} />
+                  <input name="detalles" value={formCelular.detalles} onChange={handleChangeCelular} type="text" placeholder="Detalles (Opcional)" className={claseInput + ' self-start'} />
                 </div>
                 <div className="flex md:flex-col gap-2 md:w-32">
                   <div className="relative w-28 md:w-full shrink-0">
@@ -3260,7 +3421,7 @@ function Admin() {
                 </div>
               </form>
               <p className="text-[11px] text-gray-400 mt-3">
-                Si el modelo, capacidad, color, bateria y detalles coinciden con un lote existente, las unidades se suman a ese lote y el costo y el precio de venta se recalculan como promedio ponderado.
+                Si el modelo, capacidad, color, bateria y detalles coinciden con un lote existente, las unidades se suman a ese lote y el precio de venta se recalcula como promedio ponderado. El costo y el dolar de compra no se mezclan: cada compra conserva los suyos.
               </p>
               </div>
               )}
@@ -3295,9 +3456,9 @@ function Admin() {
                         <Campo etiqueta="Bateria %">
                           <input className={claseInputEdicion} name="bateria" type="number" min="0" max="100" value={formEdicionCelular.bateria ?? ''} onChange={handleChangeEdicionCelular} />
                         </Campo>
-                        <Campo etiqueta="Costo USD">
+                        <Campo etiqueta={comprasDeUnidades(celu.unidades).length > 1 ? 'Costo USD (promedio)' : 'Costo USD'}>
                           <input className={claseInputEdicion} name="costo_usd" type="number" min="0" step="any" value={formEdicionCelular.costo_usd ?? ''} onChange={handleChangeEdicionCelular} />
-                          <PesosDe usd={formEdicionCelular.costo_usd} cot={cotCosto} />
+                          <PesosDe usd={formEdicionCelular.costo_usd} cot={dolarDelLote(celu, cotCosto)} />
                         </Campo>
                         <Campo etiqueta="Venta USD">
                           <input className={claseInputEdicion} name="precio_usd" type="number" min="0" step="any" value={formEdicionCelular.precio_usd ?? ''} onChange={handleChangeEdicionCelular} />
@@ -3380,15 +3541,16 @@ function Admin() {
                   />
                   <div className="flex flex-col min-w-0">
                     <input required name="costo_usd" value={formAccesorio.costo_usd} onChange={handleChangeAccesorio} type="number" min="0" step="any" placeholder="Costo (USD)" className={claseInput} />
-                    <PesosDe usd={formAccesorio.costo_usd} cot={cotCosto} />
+                    <PesosDe usd={formAccesorio.costo_usd} cot={dolarDeCompra(formAccesorio.cotizacion_costo, cotCosto)} />
                   </div>
+                  <CampoDolarCompra valor={formAccesorio.cotizacion_costo} onChange={handleChangeAccesorio} costoHoy={cotCosto} clase={claseInput} />
                   <div className="flex flex-col min-w-0">
                     <input required name="precio_usd" value={formAccesorio.precio_usd} onChange={handleChangeAccesorio} type="number" min="0" step="any" placeholder="Venta (USD)" className={claseInput} />
                     <span className="text-[10px] text-green-600 font-bold mt-1 ml-1 h-3">
                       {formAccesorio.precio_usd ? 'ARS $ ' + fmt(formAccesorio.precio_usd * cot) : ''}
                     </span>
                   </div>
-                  <input name="detalles" value={formAccesorio.detalles} onChange={handleChangeAccesorio} type="text" placeholder="Detalles extra" className={claseInput} />
+                  <input name="detalles" value={formAccesorio.detalles} onChange={handleChangeAccesorio} type="text" placeholder="Detalles extra" className={claseInput + ' col-span-2 md:col-span-3'} />
                 </div>
                 <div className="flex md:flex-col gap-2 md:w-32">
                   <div className="relative w-28 md:w-full shrink-0">
@@ -3399,7 +3561,7 @@ function Admin() {
                 </div>
               </form>
               <p className="text-[11px] text-gray-400 mt-3">
-                Si el tipo, modelo, color y detalles coinciden con un lote existente, las unidades se suman a ese lote y el costo y el precio de venta se recalculan como promedio ponderado.
+                Si el tipo, modelo, color y detalles coinciden con un lote existente, las unidades se suman a ese lote y el precio de venta se recalcula como promedio ponderado. El costo y el dolar de compra no se mezclan: cada compra conserva los suyos.
               </p>
               </div>
               )}
@@ -3431,9 +3593,9 @@ function Admin() {
                         <Campo etiqueta="Modelo">
                           <input className={claseInputEdicion} name="modelo" value={formEdicionAccesorio.modelo || ''} onChange={handleChangeEdicionAccesorio} />
                         </Campo>
-                        <Campo etiqueta="Costo USD">
+                        <Campo etiqueta={comprasDeUnidades(acc.unidades).length > 1 ? 'Costo USD (promedio)' : 'Costo USD'}>
                           <input className={claseInputEdicion} name="costo_usd" type="number" min="0" step="any" value={formEdicionAccesorio.costo_usd ?? ''} onChange={handleChangeEdicionAccesorio} />
-                          <PesosDe usd={formEdicionAccesorio.costo_usd} cot={cotCosto} />
+                          <PesosDe usd={formEdicionAccesorio.costo_usd} cot={dolarDelLote(acc, cotCosto)} />
                         </Campo>
                         <Campo etiqueta="Venta USD">
                           <input className={claseInputEdicion} name="precio_usd" type="number" min="0" step="any" value={formEdicionAccesorio.precio_usd ?? ''} onChange={handleChangeEdicionAccesorio} />
@@ -3800,7 +3962,7 @@ function Admin() {
 
           {hayCotizacionCosto && (
             <p className="text-[11px] md:text-xs font-medium text-gray-500">
-              La ganancia descuenta el costo a la cotizacion de costo del dia de cada venta, y se muestra en dolares a la cotizacion de venta.
+              La ganancia descuenta el costo de cada equipo a su dolar de compra (los cargados antes de guardarlo, a la cotizacion de costo del dia de la venta), y se muestra en dolares a la cotizacion de venta.
             </p>
           )}
 
@@ -4298,6 +4460,16 @@ function Admin() {
                 >
                   Editar
                 </button>
+                <button
+                  onClick={() => {
+                    const { item, tabla } = menu;
+                    setMenu(null);
+                    abrirComprasLote(item, tabla);
+                  }}
+                  className="px-4 py-3 text-sm font-bold text-blue-700 bg-white hover:bg-blue-50 text-left border-b border-gray-50"
+                >
+                  Compras y dolar
+                </button>
                 {menu.item.fuera.revendedor > 0 && (
                   <button
                     onClick={() => {
@@ -4358,6 +4530,16 @@ function Admin() {
                 className="px-4 py-3 text-sm font-bold text-gray-900 bg-white hover:bg-gray-100 text-left border-b border-gray-50"
               >
                 Sumar stock
+              </button>
+              <button
+                onClick={() => {
+                  const { item, tabla } = menu;
+                  setMenu(null);
+                  abrirComprasLote(item, tabla);
+                }}
+                className="px-4 py-3 text-sm font-bold text-blue-700 bg-white hover:bg-blue-50 text-left border-b border-gray-50"
+              >
+                Compras y dolar
               </button>
               {menu.tabla === 'accesorios' && (
                 <button
@@ -5134,8 +5316,38 @@ function Admin() {
               </button>
             </div>
 
+            <div className="grid grid-cols-2 gap-3 mt-4">
+              <label className="min-w-0 text-xs font-bold text-gray-600">
+                Costo USD c/u
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={suma.costo ?? ''}
+                  placeholder={fmt(costoPropuestoSuma(suma.item))}
+                  onChange={(e) => setSuma({ ...suma, costo: e.target.value })}
+                  className={claseInputModal + ' mt-1 font-bold text-gray-800'}
+                />
+              </label>
+              <label className="min-w-0 text-xs font-bold text-gray-600">
+                Dolar de compra
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={suma.dolar ?? ''}
+                  placeholder={fmt(cotCosto)}
+                  onChange={(e) => setSuma({ ...suma, dolar: e.target.value })}
+                  className={claseInputModal + ' mt-1 font-bold text-gray-800'}
+                />
+              </label>
+            </div>
+            <p className="mt-1 text-[11px] font-semibold text-blue-600">
+              Costo ARS $ {fmt(Math.round(costoSuma * dolarSuma))} c/u (USD {fmt(costoSuma)} x dolar {fmt(dolarSuma)})
+            </p>
+
             <p className="mt-3 bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs font-semibold text-gray-600">
-              Se cargan con los mismos datos del lote: costo USD {fmt(suma.item.costo_usd)} y venta USD {fmt(suma.item.precio_usd)} por unidad. El lote pasa a tener {suma.item.cantidad + cantidadSuma} unidades. Si esta compra tuvo otro costo, usa "Nuevo Ingreso" para que se promedie.
+              Si no tocas nada, se cargan con el costo de la ultima compra y el Costo $ de arriba. El dolar queda fijo para estas unidades: si despues cambia, su costo en pesos no se mueve. Venta USD {fmt(suma.item.precio_usd)} por unidad, como el resto del lote, que pasa a tener {suma.item.cantidad + cantidadSuma} unidades.
             </p>
 
             <div className="flex gap-3 mt-4">
@@ -5144,6 +5356,79 @@ function Admin() {
               </button>
               <button type="submit" disabled={guardando} className="disabled:opacity-60 flex-1 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition">
                 Sumar {cantidadSuma}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* MODAL: COMPRAS Y DOLAR DE UN LOTE */}
+      {comprasLote && (
+        <div className="fixed inset-0 bg-gray-900/60 z-50 flex items-center justify-center p-3 md:p-4 backdrop-blur-sm">
+          <form
+            onSubmit={conBloqueo(guardarComprasLote)}
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-4 md:p-6 border border-gray-100 max-h-[90vh] overflow-y-auto"
+          >
+            <h2 className="text-xl font-bold text-gray-800">Compras y dolar</h2>
+            <p className="text-sm font-semibold text-gray-600 mt-1 break-words">{nombreItem(comprasLote.item, comprasLote.tabla)}</p>
+            <p className="mt-2 text-xs font-medium text-gray-500">
+              Cada compra guarda su costo y el dolar al que la pagaste. Si la pagaste otro dia, corregi el dolar aca: cambia el costo en pesos y la ganancia de esas unidades cuando se vendan.
+            </p>
+
+            <div className="mt-4 space-y-3">
+              {comprasLote.filas.map((fila, i) => {
+                const costo = parseFloat(fila.costo) >= 0 ? parseFloat(fila.costo) : fila.compra.costo_usd;
+                const dolar = dolarDeCompra(fila.dolar, cotCosto);
+                return (
+                  <div key={fila.compra.clave} className="border border-gray-200 rounded-xl p-3 bg-gray-50">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="text-sm font-black text-gray-800">
+                        {comprasLote.filas.length > 1 ? 'Compra ' + (i + 1) + ' - ' : ''}{fila.compra.cantidad} u.
+                      </span>
+                      {comprasLote.filas.length > 1 && i === 0 && comprasLote.item.cantidad > 0 && (
+                        <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">Sale primero al vender</span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 mt-2">
+                      <label className="min-w-0 text-[10px] font-bold text-gray-500 uppercase tracking-wide">
+                        Costo USD c/u
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={fila.costo}
+                          onChange={(e) => cambiarFilaCompra(i, 'costo', e.target.value)}
+                          className={claseInputEdicion}
+                        />
+                      </label>
+                      <label className="min-w-0 text-[10px] font-bold text-gray-500 uppercase tracking-wide">
+                        Dolar de compra
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={fila.dolar}
+                          placeholder={'Hoy: ' + fmt(cotCosto)}
+                          onChange={(e) => cambiarFilaCompra(i, 'dolar', e.target.value)}
+                          className={claseInputEdicion}
+                        />
+                      </label>
+                    </div>
+                    <p className="mt-1.5 text-[11px] font-semibold text-blue-600">
+                      Costo ARS $ {fmt(Math.round(costo * dolar))} c/u
+                      {!(parseFloat(fila.dolar) > 0) && ' (sin dolar guardado: sigue al Costo $ de arriba)'}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex gap-3 mt-4">
+              <button type="button" onClick={() => setComprasLote(null)} className="flex-1 bg-gray-200 text-gray-800 px-4 py-2.5 rounded-lg font-bold hover:bg-gray-300 transition">
+                Cancelar
+              </button>
+              <button type="submit" disabled={guardando} className="disabled:opacity-60 flex-1 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition">
+                Guardar
               </button>
             </div>
           </form>

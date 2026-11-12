@@ -18,9 +18,11 @@ const pago = (id, revendedor, ars, fecha, aplicado = false) => ({ id, revendedor
 const tablas = {
   configuracion: [{ id: 1, cotizacion_dolar: COT, cotizacion_costo: null }],
   celulares: [
+    // Dolar de compra: el 13 PRO tiene una unidad vieja sin dolar guardado (sigue al Costo $ de
+    // arriba) y una comprada con el dolar a 1600; el 14 se compro con el dolar a 1650
     celular(1, '13 PRO', 'disponible'),
-    celular(2, '13 PRO', 'disponible'),
-    celular(3, '14', 'disponible', { costo_usd: usd(550000), precio_usd: usd(700000) }),
+    celular(2, '13 PRO', 'disponible', { cotizacion_costo: 1600 }),
+    celular(3, '14', 'disponible', { costo_usd: usd(550000), precio_usd: usd(700000), cotizacion_costo: 1650 }),
     // Venta directa de septiembre
     celular(4, '12', 'vendido', { fecha_venta: dia(-20), cotizacion_venta: COT, precio_usd: usd(450000) }),
     // Federico: le entrego 300 mil el 5/10 y hoy cerro la cuenta con 460 mil (version anterior:
