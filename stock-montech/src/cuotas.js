@@ -71,7 +71,8 @@ export function textoParaCopiar(monto, planes) {
   return [...lineas, '', AVISO_CUOTAS].join('\n');
 }
 
-// Mensaje de WhatsApp del catalogo. producto: "13 PRO 128GB (Negro, bateria 90%)" o '' si el
+// Mensaje de WhatsApp del catalogo (lo escribe el cliente, asi que no lleva el total con tarjeta,
+// solo el valor de la cuota, igual que la pantalla). producto: "13 PRO 128GB (Negro, bateria 90%)" o '' si el
 // cliente escribio un monto. plan: el que eligio o null para mandar todas las opciones.
 export function mensajeConsultaCuotas({ producto, precio, efectivo, plan, planes }) {
   const entrega = Math.max(0, Math.min(Number(efectivo) || 0, precio));
@@ -81,8 +82,7 @@ export function mensajeConsultaCuotas({ producto, precio, efectivo, plan, planes
   if (plan) {
     const c = calcularPlan(financiado, plan);
     return (
-      'Hola Montech! Quiero comprar ' + que + ' con tarjeta' + conEfectivo + ' en ' + textoPlan(c) +
-      ' (total ' + pesos(c.total) + '). ¿Me confirmás?'
+      'Hola Montech! Quiero comprar ' + que + ' con tarjeta' + conEfectivo + ' en ' + textoPlan(c) + '. ¿Me confirmás?'
     );
   }
   const opciones = planes.filter((p) => p.visible).map((p) => textoPlan(calcularPlan(financiado, p)));
