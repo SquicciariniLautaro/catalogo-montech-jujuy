@@ -144,10 +144,8 @@ function SimuladorTarjeta({ celulares, cotizacion, numeroWhatsApp }) {
                         (activo ? 'border-gray-900 bg-gray-900 text-white' : 'border-gray-200 bg-white hover:border-gray-400')
                       }
                     >
+                      {/* Al publico solo el valor de la cuota: el total con tarjeta queda para el panel */}
                       <span className="block text-base font-black">{textoPlan(c)}</span>
-                      <span className={'block text-xs font-medium ' + (activo ? 'text-gray-300' : 'text-gray-500')}>
-                        Total con tarjeta {pesos(c.total)}
-                      </span>
                     </button>
                   );
                 })}

@@ -43,7 +43,7 @@ test('mensaje de WhatsApp con el plan elegido y entrega en efectivo', () => {
   assert.equal(
     mensajeConsultaCuotas({ producto: '13 PRO 128GB (Negro)', precio: 640000, efectivo: 100000, plan, planes: PLANES_POR_DEFECTO }),
     'Hola Montech! Quiero comprar el 13 PRO 128GB (Negro) de $ 640.000 con tarjeta, entregando $ 100.000 en efectivo y el resto ' +
-      '($ 540.000) en 6 cuotas de $ 114.300 (total $ 685.800). ¿Me confirmás?'
+      '($ 540.000) en 6 cuotas de $ 114.300. ¿Me confirmás?'
   );
 });
 
